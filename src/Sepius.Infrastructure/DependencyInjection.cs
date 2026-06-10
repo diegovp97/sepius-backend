@@ -59,7 +59,20 @@ public static class DependencyInjection
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
-        var connectionString = configuration.GetConnectionString("Postgres");
+        var rawConn = configuration.GetConnectionString("Postgres") ?? "";
+        // Render provee la URL en formato postgresql://user:pass@host/db
+        // Npgsql necesita Host=...;Database=...;Username=...;Password=...
+        string connectionString;
+        if (rawConn.StartsWith("postgresql://") || rawConn.StartsWith("postgres://"))
+        {
+            var uri = new Uri(rawConn);
+            var userInfo = uri.UserInfo.Split(':');
+            connectionString = $"Host={uri.Host};Port={uri.Port};Database={uri.AbsolutePath.TrimStart('/')};Username={userInfo[0]};Password={userInfo[1]};SSL Mode=Require;Trust Server Certificate=true";
+        }
+        else
+        {
+            connectionString = rawConn;
+        }
         services.AddDbContext<AppDbContext>(opts =>
             opts.UseNpgsql(connectionString));
 
