@@ -1,6 +1,9 @@
 using System.Text.Json.Serialization;
+using Microsoft.EntityFrameworkCore;
+using Sepius.API.Hubs;
 using Sepius.API.Workers;
 using Sepius.Infrastructure;
+using Sepius.Infrastructure.Persistence;
 // ══════════════════════════════════════════════════════════════════════════════
 // PROGRAM.CS — El punto de entrada de la app y configuración del contenedor DI
 //
@@ -41,6 +44,9 @@ builder.Services.AddSwaggerGen(c =>
 // Health Checks — usado por Docker healthcheck y Kubernetes liveness probe
 builder.Services.AddHealthChecks();
 
+// SignalR — WebSockets para el chat en tiempo real
+builder.Services.AddSignalR();
+
 // CORS para el frontend Angular
 // En producción, la URL viene de la variable de entorno AllowedOrigins
 builder.Services.AddCors(options =>
@@ -59,6 +65,13 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
+// Ejecutar migraciones automáticamente al arrancar
+using (var scope = app.Services.CreateScope())
+{
+    var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+    db.Database.Migrate();
+}
+
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();
@@ -73,6 +86,7 @@ app.UseCors("Angular");
 app.UseHlsStaticFiles();
 
 app.MapHealthChecks("/health");
+app.MapHub<ChatHub>("/hubs/chat");
 
 app.MapControllers();
 

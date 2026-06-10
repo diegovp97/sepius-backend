@@ -4,6 +4,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.FileProviders;
 using Microsoft.Extensions.Options;
+using Microsoft.EntityFrameworkCore;
 using Sepius.Application.Interfaces;
 using Sepius.Infrastructure.Persistence;
 using Sepius.Infrastructure.Streamlink;
@@ -56,6 +57,11 @@ public static class DependencyInjection
         // El HttpClient se crea una vez y se reutiliza. Es el equivalente a crear
         // una instancia global de axios con configuración base.
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
+
+        // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
+        var connectionString = configuration.GetConnectionString("Postgres");
+        services.AddDbContext<AppDbContext>(opts =>
+            opts.UseNpgsql(connectionString));
 
         return services;
     }
