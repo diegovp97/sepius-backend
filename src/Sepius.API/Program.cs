@@ -57,7 +57,8 @@ builder.Services.AddCors(options =>
         policy
             .WithOrigins(origins)
             .AllowAnyMethod()
-            .AllowAnyHeader();
+            .AllowAnyHeader()
+            .AllowCredentials();
     }));
 
 // ── PIPELINE HTTP (Middleware) ────────────────────────────────────────────────
