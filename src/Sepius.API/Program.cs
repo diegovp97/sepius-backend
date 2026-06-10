@@ -45,11 +45,14 @@ builder.Services.AddHealthChecks();
 // En producción, la URL viene de la variable de entorno AllowedOrigins
 builder.Services.AddCors(options =>
     options.AddPolicy("Angular", policy =>
+    {
+        var origins = (builder.Configuration.GetValue<string>("AllowedOrigins") ?? "http://localhost:4200")
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         policy
-            .WithOrigins(
-                builder.Configuration.GetValue<string>("AllowedOrigins") ?? "http://localhost:4200")
+            .WithOrigins(origins)
             .AllowAnyMethod()
-            .AllowAnyHeader()));
+            .AllowAnyHeader();
+    }));
 
 // ── PIPELINE HTTP (Middleware) ────────────────────────────────────────────────
 // El orden importa. Equivale a los app.use() de Express.
