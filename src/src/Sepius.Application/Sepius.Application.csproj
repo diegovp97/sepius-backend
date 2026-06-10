@@ -1,0 +1,11 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Application depende de Domain pero NO de Infrastructure ni de frameworks -->
+    <ProjectReference Include="..\Sepius.Domain\Sepius.Domain.csproj" />
+  </ItemGroup>
+</Project>
