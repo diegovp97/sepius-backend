@@ -1,0 +1,25 @@
+# Binarios y artefactos de build
+**/bin/
+**/obj/
+**/publish/
+
+# Ficheros de IDE y editor
+**/.vs/
+**/.vscode/
+**/*.user
+**/*.suo
+
+# Ficheros sensibles (NUNCA commitear)
+**/.env
+**/*.env
+
+# Git
+**/.git/
+**/.gitignore
+
+# Logs
+**/*.log
+
+# Docker y compose
+**/Dockerfile*
+**/docker-compose*

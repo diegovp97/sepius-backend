@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  sepius-api:
+    build:
+      context: .
+      dockerfile: src/Sepius.API/Dockerfile
+    container_name: sepius-api
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:8080
+      # En .NET la convención para sobreescribir secciones de appsettings
+      # via variables de entorno es SECCION__CLAVE (doble guión bajo).
+      # Equivale a process.env.TWITCH_CLIENT_ID en Node.js.
+      - TwitchApi__ClientId=${TWITCH_CLIENT_ID}
+      - TwitchApi__ClientSecret=${TWITCH_CLIENT_SECRET}
+      - Streamlink__OutputPath=/recordings
+      - Monitor__PollingIntervalSeconds=120
+      - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
+    volumes:
+      # Volumen nombrado gestionado por Docker/Portainer para persistir .mp4
+      - recordings_data:/recordings
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+volumes:
+  recordings_data:
+    driver: local
