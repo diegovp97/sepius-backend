@@ -1,7 +1,10 @@
 using System.Text.Json.Serialization;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Options;
 using Sepius.API.Hubs;
 using Sepius.API.Workers;
+using Sepius.Application.Interfaces;
+using Sepius.Domain.Entities;
 using Sepius.Infrastructure;
 using Sepius.Infrastructure.Persistence;
 // ══════════════════════════════════════════════════════════════════════════════
@@ -28,7 +31,9 @@ builder.Services.AddInfrastructure(builder.Configuration);
 // AddHostedService = el host lo inicia/detiene automáticamente
 builder.Services.Configure<MonitorOptions>(
     builder.Configuration.GetSection(MonitorOptions.SectionName));
-builder.Services.AddHostedService<TwitchMonitorWorker>();
+// TwitchEventSubWorker reemplaza el polling de TwitchMonitorWorker.
+// TwitchMonitorWorker se mantiene en el proyecto como fallback pero no se registra.
+builder.Services.AddHostedService<TwitchEventSubWorker>();
 
 // Controladores con serialización de enums como strings
 // (envía "Completed" al frontend en lugar del entero 1)
@@ -55,7 +60,15 @@ builder.Services.AddCors(options =>
         var origins = (builder.Configuration.GetValue<string>("AllowedOrigins") ?? "http://localhost:4200")
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         policy
-            .WithOrigins(origins)
+            .SetIsOriginAllowed(origin =>
+            {
+                // En desarrollo: cualquier puerto de localhost está permitido
+                if (Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
+                    (uri.Host == "localhost" || uri.Host == "127.0.0.1"))
+                    return true;
+                // En producción: solo los orígenes configurados
+                return origins.Contains(origin, StringComparer.OrdinalIgnoreCase);
+            })
             .AllowAnyMethod()
             .AllowAnyHeader()
             .AllowCredentials();
@@ -71,6 +84,16 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
+
+    // Sembrar canales configurados en Monitor__Channels
+    var monitorOpts = scope.ServiceProvider.GetRequiredService<IOptions<MonitorOptions>>().Value;
+    var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
+    foreach (var name in monitorOpts.Channels.Where(n => !string.IsNullOrWhiteSpace(n)))
+    {
+        var existing = await channelRepo.GetByNameAsync(name);
+        if (existing is null)
+            await channelRepo.AddAsync(Channel.Create(name));
+    }
 }
 
 if (app.Environment.IsDevelopment())

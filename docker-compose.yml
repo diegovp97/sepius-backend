@@ -1,27 +1,47 @@
 version: '3.8'
 
 services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: sepius-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=sepius
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-sepius_dev}
+      - POSTGRES_DB=sepius
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sepius -d sepius"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   sepius-api:
     build:
       context: .
       dockerfile: src/Sepius.API/Dockerfile
     container_name: sepius-api
     restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8080:8080"
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:8080
-      # En .NET la convención para sobreescribir secciones de appsettings
-      # via variables de entorno es SECCION__CLAVE (doble guión bajo).
-      # Equivale a process.env.TWITCH_CLIENT_ID en Node.js.
       - TwitchApi__ClientId=${TWITCH_CLIENT_ID}
       - TwitchApi__ClientSecret=${TWITCH_CLIENT_SECRET}
+      # User access token — requerido para EventSub WebSocket.
+      # Obtenerlo: https://id.twitch.tv/oauth2/authorize?client_id=TU_CLIENT_ID&redirect_uri=http://localhost&response_type=token&scope=
+      - TwitchApi__UserAccessToken=${TWITCH_USER_ACCESS_TOKEN:-}
       - Streamlink__OutputPath=/recordings
       - Monitor__PollingIntervalSeconds=120
+      - Monitor__Channels__0=elttblue
       - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
+      - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
     volumes:
-      # Volumen nombrado gestionado por Docker/Portainer para persistir .mp4
       - recordings_data:/recordings
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
@@ -32,4 +52,6 @@ services:
 
 volumes:
   recordings_data:
+    driver: local
+  postgres_data:
     driver: local

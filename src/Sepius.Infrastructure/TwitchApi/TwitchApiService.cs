@@ -40,6 +40,62 @@ public sealed class TwitchApiService : ITwitchApiService
         _logger = logger;
     }
 
+    public async Task<string?> GetUserIdAsync(string channelName, CancellationToken ct = default)
+    {
+        await EnsureValidTokenAsync(ct);
+
+        var url = $"{_options.ApiBaseUrl}/users?login={Uri.EscapeDataString(channelName)}";
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("Client-Id", _options.ClientId);
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_accessToken}");
+
+        var response = await _httpClient.SendAsync(request, ct);
+        response.EnsureSuccessStatusCode();
+
+        var content = await response.Content.ReadFromJsonAsync<TwitchUsersResponse>(cancellationToken: ct);
+        return content?.Data.FirstOrDefault()?.Id;
+    }
+
+    public async Task SubscribeToStreamEventsAsync(
+        string sessionId,
+        string broadcasterId,
+        string eventType,
+        CancellationToken ct = default)
+    {
+        // WebSocket EventSub requiere un user access token, no app token.
+        if (string.IsNullOrWhiteSpace(_options.UserAccessToken))
+            throw new InvalidOperationException(
+                "TwitchApi__UserAccessToken no está configurado. " +
+                "Es obligatorio para suscripciones EventSub por WebSocket. " +
+                "Ver comentario en TwitchApiOptions para obtenerlo.");
+
+        var body = new EventSubSubscriptionRequest
+        {
+            Type = eventType,
+            Version = "1",
+            Condition = new EventSubCondition { BroadcasterUserId = broadcasterId },
+            Transport = new EventSubTransport { Method = "websocket", SessionId = sessionId }
+        };
+
+        using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.ApiBaseUrl}/eventsub/subscriptions");
+        request.Headers.TryAddWithoutValidation("Client-Id", _options.ClientId);
+        // User access token — requerido por Twitch para WebSocket transport
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_options.UserAccessToken}");
+        request.Content = JsonContent.Create(body);
+
+        var response = await _httpClient.SendAsync(request, ct);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogError("Error suscribiendo a {EventType} para {BroadcasterId}: {Status} {Error}",
+                eventType, broadcasterId, response.StatusCode, error);
+            response.EnsureSuccessStatusCode();
+        }
+
+        _logger.LogInformation("Suscrito a {EventType} para broadcaster {BroadcasterId}", eventType, broadcasterId);
+    }
+
     public async Task<bool> IsChannelLiveAsync(string channelName, CancellationToken ct = default)
     {
         await EnsureValidTokenAsync(ct);
@@ -70,10 +126,16 @@ public sealed class TwitchApiService : ITwitchApiService
         return content?.Data.Any(s => s.Type == "live") ?? false;
     }
 
+    private static bool IsTokenValid(DateTime expiry)
+        // Comprobamos que la expiración menos 5 min sea futura, guardando
+        // contra DateTime.MinValue que lanzaría ArgumentOutOfRangeException.
+        => expiry > DateTime.MinValue.AddMinutes(6)
+           && DateTime.UtcNow < expiry.AddMinutes(-5);
+
     private async Task EnsureValidTokenAsync(CancellationToken ct)
     {
         // Salida rápida si el token sigue siendo válido (con margen de 5 minutos)
-        if (DateTime.UtcNow < _tokenExpiry.AddMinutes(-5))
+        if (IsTokenValid(_tokenExpiry))
             return;
 
         // Adquirir el lock antes de verificar de nuevo (Double-Checked Locking)
@@ -81,7 +143,7 @@ public sealed class TwitchApiService : ITwitchApiService
         await _tokenLock.WaitAsync(ct);
         try
         {
-            if (DateTime.UtcNow < _tokenExpiry.AddMinutes(-5))
+            if (IsTokenValid(_tokenExpiry))
                 return; // Otro hilo ya refrescó el token mientras esperábamos
 
             _logger.LogInformation("Obteniendo/renovando token de acceso de Twitch...");

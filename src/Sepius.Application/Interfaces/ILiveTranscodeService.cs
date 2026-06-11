@@ -7,14 +7,14 @@ namespace Sepius.Application.Interfaces;
 /// </summary>
 public interface ILiveTranscodeService
 {
-    bool IsTranscoding(string channelName);
+    bool IsTranscoding(string channelName, string platform = "twitch");
 
     /// <summary>True cuando ya existen segmentos HLS listos para reproducir.</summary>
-    bool IsHlsReady(string channelName);
+    bool IsHlsReady(string channelName, string platform = "twitch");
 
     /// <summary>URL relativa al backend para que hls.js cargue el manifest.</summary>
-    string GetHlsUrl(string channelName);
+    string GetHlsUrl(string channelName, string platform = "twitch");
 
-    Task StartAsync(string channelName, CancellationToken ct = default);
-    Task StopAsync(string channelName);
+    Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default);
+    Task StopAsync(string channelName, string platform = "twitch");
 }

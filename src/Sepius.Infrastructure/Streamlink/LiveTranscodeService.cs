@@ -40,40 +40,48 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         _logger = logger;
     }
 
-    public bool IsTranscoding(string channelName)
-        => _active.ContainsKey(Normalize(channelName));
+    public bool IsTranscoding(string channelName, string platform = "twitch")
+        => _active.ContainsKey(MakeKey(platform, channelName));
 
-    public bool IsHlsReady(string channelName)
+    public bool IsHlsReady(string channelName, string platform = "twitch")
     {
-        var m3u8 = GetM3u8Path(Normalize(channelName));
+        var m3u8 = GetM3u8Path(platform, Normalize(channelName));
         return File.Exists(m3u8) && new FileInfo(m3u8).Length > 0;
     }
 
-    public string GetHlsUrl(string channelName)
-        => $"/live/{Normalize(channelName)}/index.m3u8";
+    public string GetHlsUrl(string channelName, string platform = "twitch")
+        => $"/live/{NormalizePlatform(platform)}/{Normalize(channelName)}/index.m3u8";
 
-    public Task StartAsync(string channelName, CancellationToken ct = default)
+    public Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default)
     {
+        platform   = NormalizePlatform(platform);
         channelName = Normalize(channelName);
 
         if (!ValidChannelName.IsMatch(channelName))
             throw new ArgumentException($"Nombre de canal inválido: '{channelName}'", nameof(channelName));
 
-        if (_active.ContainsKey(channelName))
+        var key = MakeKey(platform, channelName);
+        if (_active.ContainsKey(key))
         {
-            _logger.LogWarning("Ya hay un transcode activo para '{Channel}'", channelName);
+            _logger.LogWarning("Ya hay un transcode activo para '{Key}'", key);
             return Task.CompletedTask;
         }
 
-        var outputDir = GetHlsDirectory(channelName);
+        var outputDir = GetHlsDirectory(platform, channelName);
         PrepareOutputDir(outputDir);
+
+        var streamUrl = platform switch
+        {
+            "kick"   => $"kick.com/{channelName}",
+            _        => $"twitch.tv/{channelName}",
+        };
 
         // ── PROCESO 1: Streamlink → stdout ──────────────────────────────────
         var slPsi = new ProcessStartInfo
         {
             FileName = _options.ExecutablePath,
             // --stdout: vuelca el stream al stdout en lugar de a un fichero
-            Arguments = $"twitch.tv/{channelName} best --stdout",
+            Arguments = $"{streamUrl} best --stdout",
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
@@ -81,7 +89,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         };
 
         // ── PROCESO 2: ffmpeg stdin → HLS ───────────────────────────────────
-        var m3u8Path = GetM3u8Path(channelName);
+        var m3u8Path = GetM3u8Path(platform, channelName);
         var segPattern = Path.Combine(outputDir, "seg%04d.ts");
 
         var ffPsi = new ProcessStartInfo
@@ -92,8 +100,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                 "-i pipe:0",                                    // leer de stdin
                 "-c copy",                                      // copiar sin recodificar (0 CPU extra)
                 "-f hls",                                       // formato de salida HLS
-                "-hls_time 2",                                  // segmentos de 2 segundos
-                "-hls_list_size 10",                            // 10 segmentos en el manifest
+                "-hls_time 1",                                  // segmentos de 1 segundo (menor latencia)
+                "-hls_list_size 6",                             // 6 segmentos en el manifest
                 "-hls_flags delete_segments+append_list",       // borrar segmentos viejos
                 $"-hls_segment_filename \"{segPattern}\"",
                 $"\"{m3u8Path}\""
@@ -133,11 +141,11 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                     try { ff.StandardInput.Close(); } catch { }
                 }, TaskScheduler.Default);
 
-            _active[channelName] = (sl, ff, pipeTask);
+            _active[key] = (sl, ff, pipeTask);
 
             _logger.LogInformation(
-                "Live transcode iniciado. Canal: '{Channel}' | sl PID: {SlPid} | ff PID: {FfPid}",
-                channelName, sl.Id, ff.Id);
+                "Live transcode iniciado. Canal: '{Key}' | sl PID: {SlPid} | ff PID: {FfPid}",
+                key, sl.Id, ff.Id);
         }
         catch (Exception ex)
         {
@@ -150,15 +158,15 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         return Task.CompletedTask;
     }
 
-    public Task StopAsync(string channelName)
+    public Task StopAsync(string channelName, string platform = "twitch")
     {
-        channelName = Normalize(channelName);
+        var key = MakeKey(NormalizePlatform(platform), Normalize(channelName));
 
-        if (_active.TryRemove(channelName, out var entry))
+        if (_active.TryRemove(key, out var entry))
         {
-            _logger.LogInformation("Deteniendo transcode de '{Channel}'", channelName);
-            KillSafely(entry.Sl, $"{channelName}-streamlink");
-            KillSafely(entry.Ff, $"{channelName}-ffmpeg");
+            _logger.LogInformation("Deteniendo transcode de '{Key}'", key);
+            KillSafely(entry.Sl, $"{key}-streamlink");
+            KillSafely(entry.Ff, $"{key}-ffmpeg");
         }
 
         return Task.CompletedTask;
@@ -166,11 +174,17 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     // ── HELPERS ──────────────────────────────────────────────────────────────
 
-    private string GetHlsDirectory(string channelName)
-        => Path.Combine(_options.OutputPath, "live", channelName);
+    private string GetHlsDirectory(string platform, string channelName)
+        => Path.Combine(_options.OutputPath, "live", platform, channelName);
 
-    private string GetM3u8Path(string channelName)
-        => Path.Combine(GetHlsDirectory(channelName), "index.m3u8");
+    private string GetM3u8Path(string platform, string channelName)
+        => Path.Combine(GetHlsDirectory(platform, channelName), "index.m3u8");
+
+    private static string MakeKey(string platform, string channelName)
+        => $"{platform}:{channelName}";
+
+    private static string NormalizePlatform(string platform)
+        => platform.ToLowerInvariant().Trim() is "kick" ? "kick" : "twitch";
 
     private void PrepareOutputDir(string outputDir)
     {

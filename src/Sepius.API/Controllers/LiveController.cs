@@ -21,12 +21,12 @@ public sealed class LiveController : ControllerBase
     /// </summary>
     [HttpPost("{channelName}/start")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public async Task<IActionResult> Start(string channelName, CancellationToken ct)
+    public async Task<IActionResult> Start(string channelName, [FromQuery] string platform = "twitch", CancellationToken ct = default)
     {
-        await _live.StartAsync(channelName, ct);
+        await _live.StartAsync(channelName, platform, ct);
         return Ok(new
         {
-            hlsUrl = _live.GetHlsUrl(channelName),
+            hlsUrl = _live.GetHlsUrl(channelName, platform),
             message = "Transcode iniciado. El stream estará listo en unos segundos."
         });
     }
@@ -36,9 +36,9 @@ public sealed class LiveController : ControllerBase
     /// </summary>
     [HttpPost("{channelName}/stop")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> Stop(string channelName)
+    public async Task<IActionResult> Stop(string channelName, [FromQuery] string platform = "twitch")
     {
-        await _live.StopAsync(channelName);
+        await _live.StopAsync(channelName, platform);
         return NoContent();
     }
 
@@ -48,11 +48,11 @@ public sealed class LiveController : ControllerBase
     /// </summary>
     [HttpGet("{channelName}/status")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public IActionResult Status(string channelName) =>
+    public IActionResult Status(string channelName, [FromQuery] string platform = "twitch") =>
         Ok(new
         {
-            isTranscoding = _live.IsTranscoding(channelName),
-            isReady = _live.IsHlsReady(channelName),
-            hlsUrl = _live.GetHlsUrl(channelName)
+            isTranscoding = _live.IsTranscoding(channelName, platform),
+            isReady = _live.IsHlsReady(channelName, platform),
+            hlsUrl = _live.GetHlsUrl(channelName, platform)
         });
 }
