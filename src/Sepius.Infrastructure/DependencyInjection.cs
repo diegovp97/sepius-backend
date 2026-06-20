@@ -9,6 +9,7 @@ using Sepius.Application.Interfaces;
 using Sepius.Infrastructure.Persistence;
 using Sepius.Infrastructure.Streamlink;
 using Sepius.Infrastructure.TwitchApi;
+using Sepius.Infrastructure.YouTube;
 
 namespace Sepius.Infrastructure;
 
@@ -60,6 +61,10 @@ public static class DependencyInjection
         // El HttpClient se crea una vez y se reutiliza. Es el equivalente a crear
         // una instancia global de axios con configuración base.
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
+
+        // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
+        services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
+        services.AddSingleton<IYouTubeUploadService, YouTubeUploadService>();
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";

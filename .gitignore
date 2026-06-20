@@ -8,6 +8,8 @@ obj/
 ## Secrets
 .env
 appsettings.Development.json
+client_secrets.json
+youtube_token/
 
 ## Docker
 *.override.yml

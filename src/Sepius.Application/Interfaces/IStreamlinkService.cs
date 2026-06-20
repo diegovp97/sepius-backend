@@ -14,4 +14,12 @@ public interface IStreamlinkService
     Task StopRecordingAsync(string channelName);
     IReadOnlyList<Recording> GetActiveRecordings();
     IReadOnlyList<Recording> GetCompletedRecordings();
+
+    /// <summary>
+    /// Se dispara cuando una grabación termina (ya sea por StopRecordingAsync
+    /// o porque el proceso de Streamlink terminó de forma natural).
+    /// El handler recibe la grabación completada y puede usarla para post-procesado
+    /// (ej: subir a YouTube).
+    /// </summary>
+    event Func<Recording, Task>? RecordingCompleted;
 }
