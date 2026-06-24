@@ -120,51 +120,37 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             _      => $"https://www.twitch.tv/{channelName}",
         };
 
+        // Calidad preferida: 720p60 si existe; si no, el mejor que haya.
+        // -c copy: no recodificamos — Kick ya envía H.264+AAC compatible con HLS.
+        // Ventajas: 0 CPU de encoding, sin stalls, sin latencia extra.
+        var quality = platform is "kick" ? "720p60,best" : "best";
+
         var slPsi = new ProcessStartInfo
         {
             FileName               = _options.ExecutablePath,
-            Arguments              = $"{streamUrl} best --stdout",
+            Arguments              = $"{streamUrl} {quality} --stdout",
             UseShellExecute        = false,
             RedirectStandardOutput = true,
             RedirectStandardError  = true,
             CreateNoWindow         = true
         };
 
-        var segPattern   = Path.Combine(outputDir, $"s{sessionId}_%04d.m4s");
-        var initFilename = $"s{sessionId}_init.mp4";   // relativo al directorio del m3u8
+        // Segmentos TS nombrados con sessionId para cache-busting en el browser.
+        var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
 
         var ffPsi = new ProcessStartInfo
         {
             FileName = _options.FfmpegPath,
             Arguments = string.Join(" ",
-                "-y",
-                "-fflags +genpts",
-                "-i pipe:0",
-                "-map 0:v",
-                "-map 0:a",
-                "-vf scale=1280:720",
-                "-r 30",
-                "-vsync cfr",
-                "-c:v libx264",
-                "-profile:v main",
-                "-level:v 3.1",
-                "-pix_fmt yuv420p",
-                "-preset ultrafast",
-                "-tune zerolatency",
-                "-crf 23",
-                "-g 60",
-                "-keyint_min 60",
-                "-sc_threshold 0",
-                "-c:a aac",
-                "-b:a 128k",
-                "-ar 44100",
-                "-af aresample=async=1:first_pts=0",
+                "-y",                                     // sobreescribir sin preguntar
+                "-i pipe:0",                             // leer de stdin (streamlink stdout)
+                "-map 0:v",                              // solo vídeo
+                "-map 0:a",                              // solo audio (excluye timed_id3)
+                "-c copy",                               // no recodificar — 0 CPU de encoding
                 "-f hls",
-                "-hls_segment_type fmp4",
                 "-hls_time 2",
                 "-hls_list_size 6",
                 "-hls_flags delete_segments+append_list+omit_endlist",
-                $"-hls_fmp4_init_filename \"{initFilename}\"",
                 $"-hls_segment_filename \"{segPattern}\"",
                 $"\"{m3u8Path}\""),
             UseShellExecute       = false,
