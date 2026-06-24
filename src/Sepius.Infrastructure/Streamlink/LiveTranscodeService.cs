@@ -44,14 +44,11 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     public bool IsHlsReady(string channelName, string platform = "twitch")
     {
-<<<<<<< HEAD
         // Solo es ready si HAY un proceso activo Y el m3u8 existe con datos.
         // Sin esta condición, segmentos de sesiones anteriores harían que el
         // frontend cargara datos obsoletos sin lanzar un nuevo transcode.
         var key = MakeKey(NormalizePlatform(platform), Normalize(channelName));
         if (!_active.ContainsKey(key)) return false;
-=======
->>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
         var m3u8 = GetM3u8Path(NormalizePlatform(platform), Normalize(channelName));
         return File.Exists(m3u8) && new FileInfo(m3u8).Length > 0;
     }
@@ -111,27 +108,18 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         TranscodeSession session,
         CancellationToken ct)
     {
-        var outputDir  = GetHlsDirectory(platform, channelName);
-        var m3u8Path   = GetM3u8Path(platform, channelName);
-        var segPattern = Path.Combine(outputDir, "seg%04d.ts");
-        var streamUrl  = platform is "kick" ? $"kick.com/{channelName}" : $"twitch.tv/{channelName}";
+        var outputDir = GetHlsDirectory(platform, channelName);
+        var m3u8Path  = GetM3u8Path(platform, channelName);
 
         PrepareOutputDir(outputDir);
 
-<<<<<<< HEAD
-        // Prefijo único por sesión para evitar que el navegador sirva segmentos
-        // de sesiones anteriores desde su caché HTTP.
         var sessionId = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
-
         var streamUrl = platform switch
         {
-            "kick"   => $"https://kick.com/{channelName}",
-            _        => $"https://www.twitch.tv/{channelName}",
+            "kick" => $"https://kick.com/{channelName}",
+            _      => $"https://www.twitch.tv/{channelName}",
         };
 
-        // ── PROCESO 1: Streamlink → stdout ──────────────────────────────────
-=======
->>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
         var slPsi = new ProcessStartInfo
         {
             FileName               = _options.ExecutablePath,
@@ -142,62 +130,41 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             CreateNoWindow         = true
         };
 
-<<<<<<< HEAD
-        // ── PROCESO 2: ffmpeg stdin → HLS ───────────────────────────────────
-        var m3u8Path = GetM3u8Path(platform, channelName);
-        var segPattern    = Path.Combine(outputDir, $"s{sessionId}_%04d.m4s");
-        var initFilename  = $"s{sessionId}_init.mp4";   // relativo al directorio del m3u8
+        var segPattern   = Path.Combine(outputDir, $"s{sessionId}_%04d.m4s");
+        var initFilename = $"s{sessionId}_init.mp4";   // relativo al directorio del m3u8
 
         var ffPsi = new ProcessStartInfo
         {
             FileName = _options.FfmpegPath,
             Arguments = string.Join(" ",
-                "-y",                                           // sobreescribir sin preguntar
-                "-fflags +genpts",                             // regenerar PTS: el stream de Kick llega con timestamps irregulares
-                "-i pipe:0",                                    // leer de stdin
-                "-map 0:v",                                     // solo stream de video
-                "-map 0:a",                                     // solo stream de audio (excluye timed_id3)
-                // Re-encode con perfil/nivel EXPLÍCITOS. El transmuxer TS→fMP4 de hls.js
-                // malinterpreta el codec del stream de Kick (lo lee como avc1.640028 High@4.0
-                // a 1920x1080 cuando el contenido real es otro), provocando que Chrome rechace
-                // el SourceBuffer (error 4). Generando fMP4 directamente desde ffmpeg, hls.js
-                // NO transmuxea: reproduce los segmentos tal cual, con codec correcto.
-                "-vf scale=1280:720",                           // 720p: menos píxeles que 1080p
-                "-r 30",                                        // 30fps (real-time en CPU sin GPU)
-                "-vsync cfr",                                   // frame rate constante: evita gaps de PTS de video
-                "-c:v libx264",                                 // H.264
-                "-profile:v main",                              // Main profile: codec string limpio (avc1.4d401f)
-                "-level:v 3.1",                                 // nivel fijo y válido
-                "-pix_fmt yuv420p",                             // 8-bit 4:2:0 (universal en browsers)
-                "-preset ultrafast",                            // mínima CPU
-                "-tune zerolatency",                            // sin B-frames: compat. MSE live
-                "-crf 23",                                      // calidad estándar
-                "-g 60",                                        // keyframe cada 60 frames (2s @ 30fps)
-                "-keyint_min 60",                               // GOP fijo
-                "-sc_threshold 0",                              // sin keyframes por escena
-                "-c:a aac",                                     // AAC-LC
-                "-b:a 128k",                                    // 128kbps audio
-                "-ar 44100",                                    // sample rate fijo
-                "-af aresample=async=1:first_pts=0",           // resamplea audio: rellena gaps y fija A/V sync (corrige 'Packet duration out of range')
-                "-f hls",                                       // formato de salida HLS
-                "-hls_segment_type fmp4",                       // fMP4/CMAF: hls.js NO transmuxea
-                "-hls_time 2",                                  // segmentos de 2 s
-                "-hls_list_size 6",                             // 6 segmentos en el manifest
-                "-hls_flags delete_segments+append_list+omit_endlist", // live continuo
-                $"-hls_fmp4_init_filename \"{initFilename}\"", // init segment relativo al m3u8
-=======
-        var ffPsi = new ProcessStartInfo
-        {
-            FileName              = _options.FfmpegPath,
-            Arguments             = string.Join(" ",
                 "-y",
+                "-fflags +genpts",
                 "-i pipe:0",
-                "-c copy",
+                "-map 0:v",
+                "-map 0:a",
+                "-vf scale=1280:720",
+                "-r 30",
+                "-vsync cfr",
+                "-c:v libx264",
+                "-profile:v main",
+                "-level:v 3.1",
+                "-pix_fmt yuv420p",
+                "-preset ultrafast",
+                "-tune zerolatency",
+                "-crf 23",
+                "-g 60",
+                "-keyint_min 60",
+                "-sc_threshold 0",
+                "-c:a aac",
+                "-b:a 128k",
+                "-ar 44100",
+                "-af aresample=async=1:first_pts=0",
                 "-f hls",
-                "-hls_time 1",
+                "-hls_segment_type fmp4",
+                "-hls_time 2",
                 "-hls_list_size 6",
-                "-hls_flags delete_segments+append_list",
->>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
+                "-hls_flags delete_segments+append_list+omit_endlist",
+                $"-hls_fmp4_init_filename \"{initFilename}\"",
                 $"-hls_segment_filename \"{segPattern}\"",
                 $"\"{m3u8Path}\""),
             UseShellExecute       = false,

@@ -41,13 +41,9 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
     private readonly ILogger<StreamlinkService> _logger;
     private bool _disposed;
 
-<<<<<<< HEAD
-    // Regex para validar el nombre de canal (solo alfanumérico + guión bajo, 1-25 chars)
-=======
     public event Func<Recording, Task>? RecordingCompleted;
 
-    // Regex para validar nombres de canal de Twitch (solo alfanumérico + guión bajo, 1-25 chars)
->>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
+    // Regex para validar el nombre de canal (solo alfanumérico + guión bajo, 1-25 chars)
     // Se compila una vez como static readonly para rendimiento óptimo
     private static readonly Regex ValidChannelName = new(@"^[a-z0-9_]{1,25}$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);

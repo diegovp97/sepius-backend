@@ -62,17 +62,11 @@ public static class DependencyInjection
         // una instancia global de axios con configuración base.
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
 
-<<<<<<< HEAD
         // Cliente HTTP nombrado para la API pública de Kick
         services.AddHttpClient("Kick", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(15);
         });
-=======
-        // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
-        services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
-        services.AddSingleton<IYouTubeUploadService, YouTubeUploadService>();
->>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
