@@ -68,6 +68,10 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(15);
         });
 
+        // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
+        services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
+        services.AddSingleton<IYouTubeUploadService, YouTubeUploadService>();
+
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
         // Render provee la URL en formato postgresql://user:pass@host/db
