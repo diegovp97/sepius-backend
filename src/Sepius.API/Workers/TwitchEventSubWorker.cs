@@ -179,18 +179,23 @@ public sealed class TwitchEventSubWorker : BackgroundService
 
         using var scope        = _scopeFactory.CreateAsyncScope();
         var liveTranscode      = scope.ServiceProvider.GetRequiredService<ILiveTranscodeService>();
+        var streamlink         = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+        var recordingKey       = $"twitch:{channelLogin}";
 
         switch (eventType)
         {
             case "stream.online":
-                _logger.LogInformation("'{Channel}' está en DIRECTO (EventSub). Iniciando transcode.", channelLogin);
-                if (!liveTranscode.IsTranscoding(channelLogin))
-                    await liveTranscode.StartAsync(channelLogin, ct: ct);
+                _logger.LogInformation("'{Channel}' está en DIRECTO (EventSub). Iniciando HLS + grabación.", channelLogin);
+                if (!liveTranscode.IsTranscoding(channelLogin, "twitch"))
+                    await liveTranscode.StartAsync(channelLogin, "twitch", ct);
+                if (!streamlink.IsRecording(recordingKey))
+                    await streamlink.StartRecordingAsync(recordingKey, ct);
                 break;
 
             case "stream.offline":
-                _logger.LogInformation("'{Channel}' ha terminado el directo (EventSub). Deteniendo transcode.", channelLogin);
-                await liveTranscode.StopAsync(channelLogin);
+                _logger.LogInformation("'{Channel}' ha terminado el directo (EventSub). Deteniendo HLS + grabación.", channelLogin);
+                await liveTranscode.StopAsync(channelLogin, "twitch");
+                await streamlink.StopRecordingAsync(recordingKey);
                 break;
 
             default:
@@ -255,14 +260,21 @@ public sealed class TwitchEventSubWorker : BackgroundService
 
                 // EventSub solo notifica eventos futuros. Si el canal ya estaba
                 // online cuando arrancamos, no recibiremos stream.online.
-                // Comprobamos el estado actual y arrancamos el transcode si es necesario.
+                // Comprobamos el estado actual y arrancamos HLS + grabación si es necesario.
                 var isOnline = await twitchApi.IsChannelLiveAsync(channel.Name, ct);
-                if (isOnline && !liveTranscode.IsTranscoding(channel.Name))
+                if (isOnline)
                 {
-                    _logger.LogInformation(
-                        "'{Channel}' ya estaba en directo al arrancar. Iniciando transcode.",
-                        channel.Name);
-                    await liveTranscode.StartAsync(channel.Name, ct: ct);
+                    if (!liveTranscode.IsTranscoding(twitchLogin, "twitch"))
+                    {
+                        _logger.LogInformation(
+                            "'{Channel}' ya estaba en directo al arrancar. Iniciando HLS + grabación.",
+                            channel.Name);
+                        await liveTranscode.StartAsync(twitchLogin, "twitch", ct);
+                    }
+                    var recordingKey = $"twitch:{twitchLogin}";
+                    var streamlink2  = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+                    if (!streamlink2.IsRecording(recordingKey))
+                        await streamlink2.StartRecordingAsync(recordingKey, ct);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

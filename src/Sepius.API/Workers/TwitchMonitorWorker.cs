@@ -1,7 +1,8 @@
-using System.Text.Json;
+using System.Diagnostics;
 using Microsoft.Extensions.Options;
 using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
+using Sepius.Infrastructure.Streamlink;
 
 namespace Sepius.API.Workers;
 
@@ -35,18 +36,18 @@ public sealed class TwitchMonitorWorker : BackgroundService
     private readonly ILogger<TwitchMonitorWorker> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly MonitorOptions _options;
-    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly StreamlinkOptions _streamlinkOptions;
 
     public TwitchMonitorWorker(
         ILogger<TwitchMonitorWorker> logger,
         IServiceScopeFactory scopeFactory,
         IOptions<MonitorOptions> options,
-        IHttpClientFactory httpClientFactory)
+        IOptions<StreamlinkOptions> streamlinkOptions)
     {
         _logger = logger;
         _scopeFactory = scopeFactory;
         _options = options.Value;
-        _httpClientFactory = httpClientFactory;
+        _streamlinkOptions = streamlinkOptions.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -100,8 +101,9 @@ public sealed class TwitchMonitorWorker : BackgroundService
     private async Task CheckChannelsAsync(CancellationToken ct)
     {
         using var scope = _scopeFactory.CreateAsyncScope();
-        var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
-        var streamlink  = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+        var channelRepo   = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
+        var streamlink    = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+        var liveTranscode = scope.ServiceProvider.GetRequiredService<ILiveTranscodeService>();
 
         var channels = await channelRepo.GetAllAsync(ct);
 
@@ -118,25 +120,26 @@ public sealed class TwitchMonitorWorker : BackgroundService
 
         _logger.LogDebug("Verificando {Count} canal(es) Kick...", kickChannels.Count);
 
-        using var httpClient = _httpClientFactory.CreateClient("Kick");
-
         foreach (var channel in kickChannels)
         {
             ct.ThrowIfCancellationRequested();
             try
             {
                 var slug  = channel.Name["kick:".Length..];
-                // null = estado desconocido (ej: 403 Cloudflare) → no cambiar nada
-                var isLive = await IsKickChannelLiveAsync(slug, httpClient, ct);
+                // null = estado desconocido (streamlink no pudo conectar) → no cambiar nada
+                var isLive = await IsKickChannelLiveAsync(slug, ct);
 
                 if (isLive == true && !streamlink.IsRecording(channel.Name))
                 {
-                    _logger.LogInformation("'{Channel}' está en DIRECTO (Kick). Iniciando grabación.", channel.Name);
+                    _logger.LogInformation("'{Channel}' está en DIRECTO (Kick). Iniciando HLS + grabación.", channel.Name);
+                    if (!liveTranscode.IsTranscoding(slug, "kick"))
+                        await liveTranscode.StartAsync(slug, "kick", ct);
                     await streamlink.StartRecordingAsync(channel.Name, ct);
                 }
                 else if (isLive == false && streamlink.IsRecording(channel.Name))
                 {
-                    _logger.LogInformation("'{Channel}' ha terminado el directo (Kick). Deteniendo grabación.", channel.Name);
+                    _logger.LogInformation("'{Channel}' ha terminado el directo (Kick). Deteniendo HLS + grabación.", channel.Name);
+                    await liveTranscode.StopAsync(slug, "kick");
                     await streamlink.StopRecordingAsync(channel.Name);
                 }
                 else if (isLive == null)
@@ -152,46 +155,65 @@ public sealed class TwitchMonitorWorker : BackgroundService
     }
 
     /// <summary>
-    /// Comprueba si un canal de Kick está en directo usando la API pública de Kick.
-    /// Devuelve: true=live, false=offline, null=estado desconocido (403/error de red).
+    /// Usa streamlink para detectar si un canal de Kick está en directo.
+    /// Streamlink tiene plugin nativo para Kick y resuelve autenticación/Cloudflare
+    /// de forma transparente. Ejecuta: streamlink https://kick.com/{slug} --json
+    /// y parsea la salida para ver si devuelve streams disponibles.
+    /// Devuelve: true=live, false=offline, null=error/indeterminado.
     /// </summary>
-    private async Task<bool?> IsKickChannelLiveAsync(string slug, HttpClient httpClient, CancellationToken ct)
+    private async Task<bool?> IsKickChannelLiveAsync(string slug, CancellationToken ct)
     {
         try
         {
-            var url = $"https://kick.com/api/v2/channels/{Uri.EscapeDataString(slug)}";
-            using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.TryAddWithoutValidation("User-Agent",
-                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36");
-            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            cts.CancelAfter(TimeSpan.FromSeconds(20)); // timeout duro
 
-            var response = await httpClient.SendAsync(request, ct);
-
-            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden ||
-                response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            var psi = new ProcessStartInfo
             {
-                // Cloudflare bloqueó la petición — no sabemos el estado, mantener el actual
-                _logger.LogWarning("Kick API devolvió {Status} para '{Slug}' (posible Cloudflare). Estado mantenido.",
-                    response.StatusCode, slug);
-                return null;
+                FileName               = _streamlinkOptions.ExecutablePath,
+                Arguments              = $"https://kick.com/{slug} --json",
+                UseShellExecute        = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError  = true,
+                CreateNoWindow         = true,
+            };
+
+            using var proc = new Process { StartInfo = psi };
+            proc.Start();
+
+            var stdout = await proc.StandardOutput.ReadToEndAsync(cts.Token);
+            await proc.WaitForExitAsync(cts.Token);
+
+            // streamlink --json devuelve un objeto JSON. Si el canal está offline:
+            //   { "error": "No playable streams found on this URL: ..." }
+            // Si está en directo:
+            //   { "streams": { "best": {...}, "720p60": {...}, ... } }
+            if (stdout.Contains("No playable streams", StringComparison.OrdinalIgnoreCase) ||
+                stdout.Contains("\"error\":", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("Streamlink: '{Slug}' offline o sin streams.", slug);
+                return false;
             }
 
-            if (!response.IsSuccessStatusCode)
+            if (stdout.Contains("\"streams\":", StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogWarning("Kick API devolvió {Status} para '{Slug}'", response.StatusCode, slug);
-                return null;
+                _logger.LogDebug("Streamlink: '{Slug}' está en directo.", slug);
+                return true;
             }
 
-            await using var stream = await response.Content.ReadAsStreamAsync(ct);
-            using var doc  = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
-
-            // "livestream" es null cuando offline, objeto cuando en directo
-            return doc.RootElement.TryGetProperty("livestream", out var ls)
-                   && ls.ValueKind != JsonValueKind.Null;
+            // Salida inesperada (p.ej. plugin no instalado, error de red)
+            _logger.LogWarning("Streamlink: salida inesperada para '{Slug}': {Output}",
+                slug, stdout.Length > 200 ? stdout[..200] : stdout);
+            return null;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
+        catch (OperationCanceledException)
         {
-            _logger.LogError(ex, "Error al consultar Kick API para '{Slug}'", slug);
+            _logger.LogWarning("Streamlink: timeout comprobando directo de '{Slug}'. Estado mantenido.", slug);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Streamlink: error comprobando directo de '{Slug}'.", slug);
             return null;
         }
     }

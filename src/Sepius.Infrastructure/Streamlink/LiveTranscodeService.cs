@@ -73,10 +73,12 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         {
             var existing = _active[key];
             _logger.LogWarning(
-                "Ya hay transcode activo para '{Key}'. Estado={Status}",
+                "[Transcode] Ya hay sesión activa para '{Key}'. Estado={Status}. Ignorando arranque duplicado.",
                 key, existing.Status);
             return Task.CompletedTask;
         }
+
+        _logger.LogInformation("[Transcode] Arrancando pipeline para '{Key}'...", key);
 
         // Lanzar en background — no bloquea el EventSub worker
         _ = RunTranscodeAsync(key, platform, channelName, session, ct);
@@ -167,22 +169,33 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             sl.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data is null) return;
-                _logger.LogDebug("[{Ch}|sl] {L}", channelName, e.Data);
+                _logger.LogDebug("[{Key}|sl] {L}", key, e.Data);
 
                 // Detectar "No playable streams" — señal de que no hay directo
                 if (e.Data.Contains("No playable streams found", StringComparison.OrdinalIgnoreCase))
                 {
                     _logger.LogWarning(
-                        "Streamlink: no hay directo activo para '{Channel}'. Abortando transcode.",
-                        channelName);
+                        "[Transcode] Streamlink: no hay streams para '{Key}'. Abortando.",
+                        key);
                     session.Status = TranscodeStatus.Failed;
                     KillSession(session, key);
                 }
+
+                // Log cuando streamlink encuentra streams disponibles
+                if (e.Data.Contains("Available streams:", StringComparison.OrdinalIgnoreCase))
+                    _logger.LogInformation("[Transcode] Streams disponibles en '{Key}': {Streams}", key, e.Data);
+
+                // Log cuando streamlink abre el stream
+                if (e.Data.Contains("Opening stream:", StringComparison.OrdinalIgnoreCase))
+                    _logger.LogInformation("[Transcode] Streamlink abriendo stream '{Key}': {Info}", key, e.Data);
             };
 
             ff.ErrorDataReceived += (_, e) =>
             {
-                if (e.Data is not null) _logger.LogDebug("[{Ch}|ff] {L}", channelName, e.Data);
+                if (e.Data is null) return;
+                // Solo loguear líneas importantes de ffmpeg (no el spam de frames)
+                if (e.Data.StartsWith("frame=", StringComparison.OrdinalIgnoreCase)) return;
+                _logger.LogDebug("[{Key}|ff] {L}", key, e.Data);
             };
 
             sl.Start();
@@ -196,8 +209,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             session.Status            = TranscodeStatus.Running;
 
             _logger.LogInformation(
-                "Live transcode iniciado. Canal='{Key}' sl.PID={SlPid} ff.PID={FfPid}",
-                key, sl.Id, ff.Id);
+                "[Transcode] Pipeline activo. Key='{Key}' | sl.PID={SlPid} | ff.PID={FfPid} | out={OutDir}",
+                key, sl.Id, ff.Id, outputDir);
 
             // Pipe stdout de streamlink → stdin de ffmpeg
             _ = sl.StandardOutput.BaseStream
@@ -213,8 +226,9 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                 ff.WaitForExitAsync(ct)).ConfigureAwait(false);
 
             _logger.LogWarning(
-                "Proceso terminado para '{Key}'. sl.Exited={SlExited} ff.Exited={FfExited}",
-                key, sl.HasExited, ff.HasExited);
+                "[Transcode] Proceso terminado para '{Key}'. sl.Exited={SlExited}(code={SlCode}) ff.Exited={FfExited}(code={FfCode})",
+                key, sl.HasExited, sl.HasExited ? sl.ExitCode : -1,
+                ff.HasExited, ff.HasExited ? ff.ExitCode : -1);
         }
         catch (OperationCanceledException)
         {
@@ -244,7 +258,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             : TranscodeStatus.Stopped;
 
         _logger.LogInformation(
-            "Limpiando transcode para '{Key}'. Estado final={Status}",
+            "[Transcode] Limpiando sesión '{Key}'. Estado final={Status}",
             key, finalStatus);
 
         KillSession(session, key);
