@@ -8,17 +8,10 @@ using Sepius.Infrastructure.TwitchApi;
 namespace Sepius.API.Workers;
 
 /// <summary>
-/// Reemplaza el polling de TwitchMonitorWorker con una conexión WebSocket
-/// persistente a Twitch EventSub, lo que elimina el retraso de hasta 120s
-/// y reduce el consumo de cuota de la API Helix.
-///
-/// FLUJO:
-///   1. Conectar a wss://eventsub.wss.twitch.tv/ws
-///   2. Twitch envía session_welcome → suscribir stream.online + stream.offline
-///      para cada canal registrado vía POST /helix/eventsub/subscriptions
-///   3. Procesar notificaciones en tiempo real
-///   4. Manejar session_reconnect (Twitch puede migrar la sesión sin pérdida)
-///   5. Reconectar con backoff si la conexión cae
+/// Mantiene una conexión WebSocket persistente a Twitch EventSub.
+/// Solo inicia transcode cuando Twitch confirma stream.online.
+/// Comprueba el estado actual del canal justo después de suscribirse,
+/// por si el directo ya estaba activo cuando arrancó la app.
 /// </summary>
 public sealed class TwitchEventSubWorker : BackgroundService
 {
@@ -27,9 +20,7 @@ public sealed class TwitchEventSubWorker : BackgroundService
     private readonly ILogger<TwitchEventSubWorker> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly MonitorOptions _options;
-    private readonly TwitchApiOptions _twitchOptions;
 
-    // Opciones de deserialización reutilizables (evita allocations en cada mensaje)
     private static readonly JsonSerializerOptions JsonOpts = new()
     {
         PropertyNameCaseInsensitive = true
@@ -38,13 +29,11 @@ public sealed class TwitchEventSubWorker : BackgroundService
     public TwitchEventSubWorker(
         ILogger<TwitchEventSubWorker> logger,
         IServiceScopeFactory scopeFactory,
-        IOptions<MonitorOptions> options,
-        IOptions<TwitchApiOptions> twitchOptions)
+        IOptions<MonitorOptions> options)
     {
-        _logger = logger;
+        _logger       = logger;
         _scopeFactory = scopeFactory;
-        _options = options.Value;
-        _twitchOptions = twitchOptions.Value;
+        _options      = options.Value;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -183,26 +172,25 @@ public sealed class TwitchEventSubWorker : BackgroundService
     /// </summary>
     private async Task HandleNotificationAsync(EventSubEnvelope envelope, CancellationToken ct)
     {
-        var eventType = envelope.Payload.Subscription?.Type;
+        var eventType    = envelope.Payload.Subscription?.Type;
         var channelLogin = envelope.Payload.Event?.BroadcasterUserLogin;
 
         if (string.IsNullOrWhiteSpace(channelLogin)) return;
 
-        using var scope = _scopeFactory.CreateAsyncScope();
-        var streamlink = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+        using var scope        = _scopeFactory.CreateAsyncScope();
+        var liveTranscode      = scope.ServiceProvider.GetRequiredService<ILiveTranscodeService>();
 
         switch (eventType)
         {
             case "stream.online":
-                _logger.LogInformation("'{Channel}' está en DIRECTO (EventSub). Iniciando grabación.", channelLogin);
-                if (!streamlink.IsRecording(channelLogin))
-                    await streamlink.StartRecordingAsync(channelLogin, ct);
+                _logger.LogInformation("'{Channel}' está en DIRECTO (EventSub). Iniciando transcode.", channelLogin);
+                if (!liveTranscode.IsTranscoding(channelLogin))
+                    await liveTranscode.StartAsync(channelLogin, ct: ct);
                 break;
 
             case "stream.offline":
-                _logger.LogInformation("'{Channel}' ha terminado el directo (EventSub). Deteniendo grabación.", channelLogin);
-                if (streamlink.IsRecording(channelLogin))
-                    await streamlink.StopRecordingAsync(channelLogin);
+                _logger.LogInformation("'{Channel}' ha terminado el directo (EventSub). Deteniendo transcode.", channelLogin);
+                await liveTranscode.StopAsync(channelLogin);
                 break;
 
             default:
@@ -212,14 +200,17 @@ public sealed class TwitchEventSubWorker : BackgroundService
     }
 
     /// <summary>
-    /// Para cada canal registrado, resuelve su broadcaster_user_id y suscribe
-    /// a stream.online y stream.offline.
+    /// Para cada canal registrado, resuelve su broadcaster_user_id, suscribe
+    /// a stream.online/offline y arranca el transcode si el canal ya estaba online.
+    /// EventSub solo notifica eventos futuros; si el canal estaba en directo antes
+    /// de conectar, hay que comprobarlo explícitamente aquí.
     /// </summary>
     private async Task SubscribeAllChannelsAsync(string sessionId, CancellationToken ct)
     {
-        using var scope = _scopeFactory.CreateAsyncScope();
-        var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
-        var twitchApi = scope.ServiceProvider.GetRequiredService<ITwitchApiService>();
+        using var scope        = _scopeFactory.CreateAsyncScope();
+        var channelRepo        = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
+        var twitchApi          = scope.ServiceProvider.GetRequiredService<ITwitchApiService>();
+        var liveTranscode      = scope.ServiceProvider.GetRequiredService<ILiveTranscodeService>();
 
         var channels = await channelRepo.GetAllAsync(ct);
         var monitored = channels.Where(c => c.IsMonitored).ToList();
@@ -255,29 +246,28 @@ public sealed class TwitchEventSubWorker : BackgroundService
                     continue;
                 }
 
-                await twitchApi.SubscribeToStreamEventsAsync(sessionId, broadcasterId, "stream.online", ct);
+                await twitchApi.SubscribeToStreamEventsAsync(sessionId, broadcasterId, "stream.online",  ct);
                 await twitchApi.SubscribeToStreamEventsAsync(sessionId, broadcasterId, "stream.offline", ct);
 
-                _logger.LogInformation("Suscrito a stream.online/offline para '{Channel}' (id={Id})",
+                _logger.LogInformation(
+                    "Suscrito a stream.online/offline para '{Channel}' (id={Id})",
                     channel.Name, broadcasterId);
-            }
-            catch (InvalidOperationException ex) when (ex.Message.Contains("UserAccessToken"))
-            {
-                // Token de usuario no configurado — mostrar instrucciones claras y abortar
-                _logger.LogError(
-                    "⚠ TwitchApi__UserAccessToken no está configurado.\n" +
-                    "EventSub WebSocket requiere un user access token. Pasos:\n" +
-                    "  1. Abre en el navegador:\n" +
-                    "     https://id.twitch.tv/oauth2/authorize?client_id={ClientId}&redirect_uri=http://localhost&response_type=token&scope=\n" +
-                    "  2. Autoriza y copia el access_token de la URL.\n" +
-                    "  3. Añade al .env: TwitchApi__UserAccessToken=<token>\n" +
-                    "  4. Reinicia: docker-compose up --build",
-                    _twitchOptions.ClientId ?? "TU_CLIENT_ID");
-                return; // No seguir intentando con otros canales
+
+                // EventSub solo notifica eventos futuros. Si el canal ya estaba
+                // online cuando arrancamos, no recibiremos stream.online.
+                // Comprobamos el estado actual y arrancamos el transcode si es necesario.
+                var isOnline = await twitchApi.IsChannelLiveAsync(channel.Name, ct);
+                if (isOnline && !liveTranscode.IsTranscoding(channel.Name))
+                {
+                    _logger.LogInformation(
+                        "'{Channel}' ya estaba en directo al arrancar. Iniciando transcode.",
+                        channel.Name);
+                    await liveTranscode.StartAsync(channel.Name, ct: ct);
+                }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                _logger.LogError(ex, "Error suscribiendo EventSub para '{Channel}'.", channel.Name);
+                _logger.LogError(ex, "Error suscribiendo EventSub para '{Channel}'. Reintentando en el próximo ciclo.", channel.Name);
             }
         }
     }

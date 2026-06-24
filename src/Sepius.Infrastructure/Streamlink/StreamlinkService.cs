@@ -41,7 +41,13 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
     private readonly ILogger<StreamlinkService> _logger;
     private bool _disposed;
 
+<<<<<<< HEAD
     // Regex para validar el nombre de canal (solo alfanumérico + guión bajo, 1-25 chars)
+=======
+    public event Func<Recording, Task>? RecordingCompleted;
+
+    // Regex para validar nombres de canal de Twitch (solo alfanumérico + guión bajo, 1-25 chars)
+>>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
     // Se compila una vez como static readonly para rendimiento óptimo
     private static readonly Regex ValidChannelName = new(@"^[a-z0-9_]{1,25}$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -186,6 +192,7 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
         lock (_completedLock)
             _completed.Add(entry.Recording);
 
+        FireRecordingCompleted(entry.Recording);
         KillProcessSafely(entry.Process, channelName);
         return Task.CompletedTask;
     }
@@ -224,6 +231,8 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
 
             lock (_completedLock)
                 _completed.Add(entry.Recording);
+
+            FireRecordingCompleted(entry.Recording);
         }
 
         try { process.Dispose(); }
@@ -257,6 +266,24 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
         {
             process.Dispose();
         }
+    }
+
+    private void FireRecordingCompleted(Recording recording)
+    {
+        var handler = RecordingCompleted;
+        if (handler is null) return;
+
+        // Disparar en background para no bloquear el hilo del proceso
+        Task.Run(async () =>
+        {
+            try { await handler(recording); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Error en handler de RecordingCompleted para '{Channel}'",
+                    recording.ChannelName);
+            }
+        });
     }
 
     private static void UpdateFileSize(Recording recording)

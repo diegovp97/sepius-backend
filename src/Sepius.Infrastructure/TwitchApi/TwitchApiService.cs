@@ -62,12 +62,8 @@ public sealed class TwitchApiService : ITwitchApiService
         string eventType,
         CancellationToken ct = default)
     {
-        // WebSocket EventSub requiere un user access token, no app token.
-        if (string.IsNullOrWhiteSpace(_options.UserAccessToken))
-            throw new InvalidOperationException(
-                "TwitchApi__UserAccessToken no está configurado. " +
-                "Es obligatorio para suscripciones EventSub por WebSocket. " +
-                "Ver comentario en TwitchApiOptions para obtenerlo.");
+        // Asegurarse de tener un app token válido antes de suscribir
+        await EnsureValidTokenAsync(ct);
 
         var body = new EventSubSubscriptionRequest
         {
@@ -79,8 +75,8 @@ public sealed class TwitchApiService : ITwitchApiService
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.ApiBaseUrl}/eventsub/subscriptions");
         request.Headers.TryAddWithoutValidation("Client-Id", _options.ClientId);
-        // User access token — requerido por Twitch para WebSocket transport
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_options.UserAccessToken}");
+        // App access token (Client Credentials) — válido para stream.online / stream.offline vía WebSocket
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_accessToken}");
         request.Content = JsonContent.Create(body);
 
         var response = await _httpClient.SendAsync(request, ct);
@@ -146,20 +142,36 @@ public sealed class TwitchApiService : ITwitchApiService
             if (IsTokenValid(_tokenExpiry))
                 return; // Otro hilo ya refrescó el token mientras esperábamos
 
-            _logger.LogInformation("Obteniendo/renovando token de acceso de Twitch...");
+            _logger.LogInformation(
+                "Obteniendo/renovando token de acceso de Twitch. ClientId presente={HasClientId}, ClientIdLength={ClientIdLength}, SecretPresente={HasSecret}, SecretLength={SecretLength}",
+                !string.IsNullOrWhiteSpace(_options.ClientId),
+                _options.ClientId?.Length ?? 0,
+                !string.IsNullOrWhiteSpace(_options.ClientSecret),
+                _options.ClientSecret?.Length ?? 0);
 
             var tokenBody = new FormUrlEncodedContent(new Dictionary<string, string>
             {
-                ["client_id"] = _options.ClientId,
-                ["client_secret"] = _options.ClientSecret,
-                ["grant_type"] = "client_credentials"
+                ["client_id"]     = _options.ClientId!,
+                ["client_secret"] = _options.ClientSecret!,
+                ["grant_type"]    = "client_credentials"
             });
 
             var tokenResponse = await _httpClient.PostAsync(_options.TokenEndpoint, tokenBody, ct);
-            tokenResponse.EnsureSuccessStatusCode();
 
-            var tokenData = await tokenResponse.Content.ReadFromJsonAsync<TwitchTokenResponse>(
-                cancellationToken: ct)
+            var responseBody = await tokenResponse.Content.ReadAsStringAsync(ct);
+
+            if (!tokenResponse.IsSuccessStatusCode)
+            {
+                _logger.LogError(
+                    "Error obteniendo token de Twitch. Status={StatusCode}. Body={Body}",
+                    tokenResponse.StatusCode,
+                    responseBody);
+                tokenResponse.EnsureSuccessStatusCode();
+            }
+
+            var tokenData = System.Text.Json.JsonSerializer.Deserialize<TwitchTokenResponse>(
+                responseBody,
+                new System.Text.Json.JsonSerializerOptions { PropertyNameCaseInsensitive = true })
                 ?? throw new InvalidOperationException("Respuesta de token de Twitch vacía.");
 
             _accessToken = tokenData.AccessToken;

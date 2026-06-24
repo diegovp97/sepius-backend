@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Sepius.Application.Interfaces;
+using Sepius.Domain.Entities;
 
 namespace Sepius.API.Workers;
 
@@ -53,6 +54,19 @@ public sealed class TwitchMonitorWorker : BackgroundService
         _logger.LogInformation(
             "TwitchMonitorWorker iniciado. Intervalo: {Interval}s",
             _options.PollingIntervalSeconds);
+
+        // Suscribirse al evento de grabación completada para subir a YouTube
+        using var scope = _scopeFactory.CreateAsyncScope();
+        var streamlink = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+        var youtubeUpload = scope.ServiceProvider.GetRequiredService<IYouTubeUploadService>();
+
+        streamlink.RecordingCompleted += async (recording) =>
+        {
+            _logger.LogInformation(
+                "Grabación completada para '{Channel}'. Iniciando subida a YouTube...",
+                recording.ChannelName);
+            await youtubeUpload.UploadAsync(recording);
+        };
 
         // PeriodicTimer es la forma moderna (.NET 6+) de hacer polling periódico.
         // Se cancela limpiamente cuando stoppingToken es cancelado.

@@ -9,6 +9,7 @@ using Sepius.Application.Interfaces;
 using Sepius.Infrastructure.Persistence;
 using Sepius.Infrastructure.Streamlink;
 using Sepius.Infrastructure.TwitchApi;
+using Sepius.Infrastructure.YouTube;
 
 namespace Sepius.Infrastructure;
 
@@ -32,8 +33,11 @@ public static class DependencyInjection
         // Mapea la sección del JSON a una clase fuertemente tipada.
         // En los servicios se inyecta IOptions<TwitchApiOptions> en lugar de
         // IConfiguration directamente (más testeable y tipado).
-        services.Configure<TwitchApiOptions>(
-            configuration.GetSection(TwitchApiOptions.SectionName));
+        services.AddOptions<TwitchApiOptions>()
+            .Bind(configuration.GetSection(TwitchApiOptions.SectionName))
+            .Validate(o => !string.IsNullOrWhiteSpace(o.ClientId),     "TwitchApi__ClientId es obligatorio")
+            .Validate(o => !string.IsNullOrWhiteSpace(o.ClientSecret), "TwitchApi__ClientSecret es obligatorio")
+            .ValidateOnStart();
 
         services.Configure<StreamlinkOptions>(
             configuration.GetSection(StreamlinkOptions.SectionName));
@@ -58,11 +62,17 @@ public static class DependencyInjection
         // una instancia global de axios con configuración base.
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
 
+<<<<<<< HEAD
         // Cliente HTTP nombrado para la API pública de Kick
         services.AddHttpClient("Kick", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(15);
         });
+=======
+        // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
+        services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
+        services.AddSingleton<IYouTubeUploadService, YouTubeUploadService>();
+>>>>>>> a2f783527fd4e29f8f0fc23a7dbdf1ed89cf91b9
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
