@@ -38,7 +38,7 @@ services:
       - TwitchApi__UserAccessToken=${TWITCH_USER_ACCESS_TOKEN:-}
       - Streamlink__OutputPath=/recordings
       - Monitor__PollingIntervalSeconds=120
-      - Monitor__Channels__0=elttblue
+      - Monitor__Channels__0=kick:elttblue
       - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
       - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
     volumes:

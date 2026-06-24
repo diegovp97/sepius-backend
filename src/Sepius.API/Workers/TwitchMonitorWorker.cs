@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.Extensions.Options;
 using Sepius.Application.Interfaces;
 
@@ -24,20 +25,27 @@ namespace Sepius.API.Workers;
 ///    - Task.Delay(X) espera X ms desde que termina la iteración anterior.
 ///    - PeriodicTimer dispara cada X ms en tiempo de reloj real (más preciso).
 /// </summary>
+/// <summary>
+/// Worker de polling exclusivo para plataformas no-Twitch (actualmente Kick).
+/// Twitch se gestiona en tiempo real mediante TwitchEventSubWorker.
+/// </summary>
 public sealed class TwitchMonitorWorker : BackgroundService
 {
     private readonly ILogger<TwitchMonitorWorker> _logger;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly MonitorOptions _options;
+    private readonly IHttpClientFactory _httpClientFactory;
 
     public TwitchMonitorWorker(
         ILogger<TwitchMonitorWorker> logger,
         IServiceScopeFactory scopeFactory,
-        IOptions<MonitorOptions> options)
+        IOptions<MonitorOptions> options,
+        IHttpClientFactory httpClientFactory)
     {
         _logger = logger;
         _scopeFactory = scopeFactory;
         _options = options.Value;
+        _httpClientFactory = httpClientFactory;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -77,50 +85,100 @@ public sealed class TwitchMonitorWorker : BackgroundService
 
     private async Task CheckChannelsAsync(CancellationToken ct)
     {
-        // Crear un scope de DI para poder resolver servicios Scoped o Singleton
-        // desde dentro del worker Singleton.
-        // using var: el scope (y sus servicios) se libera al salir del bloque.
         using var scope = _scopeFactory.CreateAsyncScope();
         var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
-        var twitchApi = scope.ServiceProvider.GetRequiredService<ITwitchApiService>();
-        var streamlink = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
+        var streamlink  = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
 
         var channels = await channelRepo.GetAllAsync(ct);
-        var monitored = channels.Where(c => c.IsMonitored).ToList();
 
-        if (monitored.Count == 0)
+        // Este worker solo gestiona canales Kick; Twitch lo maneja TwitchEventSubWorker
+        var kickChannels = channels
+            .Where(c => c.IsMonitored && c.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (kickChannels.Count == 0)
         {
-            _logger.LogDebug("No hay canales monitorizados configurados.");
+            _logger.LogDebug("No hay canales Kick monitorizados.");
             return;
         }
 
-        _logger.LogDebug("Verificando {Count} canal(es)...", monitored.Count);
+        _logger.LogDebug("Verificando {Count} canal(es) Kick...", kickChannels.Count);
 
-        foreach (var channel in monitored)
+        using var httpClient = _httpClientFactory.CreateClient("Kick");
+
+        foreach (var channel in kickChannels)
         {
-            // Respetar la cancelación entre canales (útil si hay muchos)
             ct.ThrowIfCancellationRequested();
-
             try
             {
-                var isLive = await twitchApi.IsChannelLiveAsync(channel.Name, ct);
+                var slug  = channel.Name["kick:".Length..];
+                // null = estado desconocido (ej: 403 Cloudflare) → no cambiar nada
+                var isLive = await IsKickChannelLiveAsync(slug, httpClient, ct);
 
-                if (isLive && !streamlink.IsRecording(channel.Name))
+                if (isLive == true && !streamlink.IsRecording(channel.Name))
                 {
-                    _logger.LogInformation("'{Channel}' está en DIRECTO. Iniciando grabación.", channel.Name);
+                    _logger.LogInformation("'{Channel}' está en DIRECTO (Kick). Iniciando grabación.", channel.Name);
                     await streamlink.StartRecordingAsync(channel.Name, ct);
                 }
-                else if (!isLive && streamlink.IsRecording(channel.Name))
+                else if (isLive == false && streamlink.IsRecording(channel.Name))
                 {
-                    _logger.LogInformation("'{Channel}' ha terminado el directo. Deteniendo grabación.", channel.Name);
+                    _logger.LogInformation("'{Channel}' ha terminado el directo (Kick). Deteniendo grabación.", channel.Name);
                     await streamlink.StopRecordingAsync(channel.Name);
+                }
+                else if (isLive == null)
+                {
+                    _logger.LogDebug("Estado de '{Channel}' desconocido (posible bloqueo Cloudflare). Estado actual mantenido.", channel.Name);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
-                // Error en un canal específico no debe detener la verificación del resto
-                _logger.LogError(ex, "Error verificando canal '{Channel}'", channel.Name);
+                _logger.LogError(ex, "Error verificando canal Kick '{Channel}'", channel.Name);
             }
+        }
+    }
+
+    /// <summary>
+    /// Comprueba si un canal de Kick está en directo usando la API pública de Kick.
+    /// Devuelve: true=live, false=offline, null=estado desconocido (403/error de red).
+    /// </summary>
+    private async Task<bool?> IsKickChannelLiveAsync(string slug, HttpClient httpClient, CancellationToken ct)
+    {
+        try
+        {
+            var url = $"https://kick.com/api/v2/channels/{Uri.EscapeDataString(slug)}";
+            using var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.TryAddWithoutValidation("User-Agent",
+                "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36");
+            request.Headers.TryAddWithoutValidation("Accept", "application/json");
+
+            var response = await httpClient.SendAsync(request, ct);
+
+            if (response.StatusCode == System.Net.HttpStatusCode.Forbidden ||
+                response.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                // Cloudflare bloqueó la petición — no sabemos el estado, mantener el actual
+                _logger.LogWarning("Kick API devolvió {Status} para '{Slug}' (posible Cloudflare). Estado mantenido.",
+                    response.StatusCode, slug);
+                return null;
+            }
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning("Kick API devolvió {Status} para '{Slug}'", response.StatusCode, slug);
+                return null;
+            }
+
+            await using var stream = await response.Content.ReadAsStreamAsync(ct);
+            using var doc  = await JsonDocument.ParseAsync(stream, cancellationToken: ct);
+
+            // "livestream" es null cuando offline, objeto cuando en directo
+            return doc.RootElement.TryGetProperty("livestream", out var ls)
+                   && ls.ValueKind != JsonValueKind.Null;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogError(ex, "Error al consultar Kick API para '{Slug}'", slug);
+            return null;
         }
     }
 }

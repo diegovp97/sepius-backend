@@ -56,6 +56,14 @@ public sealed class TwitchEventSubWorker : BackgroundService
 
         while (!stoppingToken.IsCancellationRequested)
         {
+            // Si no hay canales Twitch, no tiene sentido conectar el WebSocket
+            if (!await HasTwitchChannelsAsync(stoppingToken))
+            {
+                _logger.LogDebug("Sin canales Twitch. TwitchEventSubWorker en espera 60s...");
+                await Task.Delay(TimeSpan.FromSeconds(60), stoppingToken);
+                continue;
+            }
+
             try
             {
                 await RunSessionAsync(WssEndpoint, stoppingToken);
@@ -225,9 +233,22 @@ public sealed class TwitchEventSubWorker : BackgroundService
         foreach (var channel in monitored)
         {
             ct.ThrowIfCancellationRequested();
+
+            // Los canales Kick los gestiona TwitchMonitorWorker (polling), no EventSub
+            if (channel.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase))
+            {
+                _logger.LogDebug("'{Channel}' es Kick, se omite en EventSub.", channel.Name);
+                continue;
+            }
+
             try
             {
-                var broadcasterId = await twitchApi.GetUserIdAsync(channel.Name, ct);
+                // Para canales con prefijo "twitch:", usar solo la parte del nombre
+                var twitchLogin = channel.Name.StartsWith("twitch:", StringComparison.OrdinalIgnoreCase)
+                    ? channel.Name["twitch:".Length..]
+                    : channel.Name;
+
+                var broadcasterId = await twitchApi.GetUserIdAsync(twitchLogin, ct);
                 if (broadcasterId is null)
                 {
                     _logger.LogWarning("No se encontró user_id para '{Channel}'. Saltando.", channel.Name);
@@ -259,5 +280,17 @@ public sealed class TwitchEventSubWorker : BackgroundService
                 _logger.LogError(ex, "Error suscribiendo EventSub para '{Channel}'.", channel.Name);
             }
         }
+    }
+
+    /// <summary>
+    /// Devuelve true si hay al menos un canal Twitch (sin prefijo o con "twitch:") monitorizado.
+    /// </summary>
+    private async Task<bool> HasTwitchChannelsAsync(CancellationToken ct)
+    {
+        using var scope = _scopeFactory.CreateAsyncScope();
+        var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
+        var channels = await channelRepo.GetAllAsync(ct);
+        return channels.Any(c => c.IsMonitored &&
+                                 !c.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase));
     }
 }

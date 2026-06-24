@@ -58,6 +58,12 @@ public static class DependencyInjection
         // una instancia global de axios con configuración base.
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
 
+        // Cliente HTTP nombrado para la API pública de Kick
+        services.AddHttpClient("Kick", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+        });
+
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
         // Render provee la URL en formato postgresql://user:pass@host/db
@@ -96,12 +102,21 @@ public static class DependencyInjection
         var contentTypes = new FileExtensionContentTypeProvider();
         contentTypes.Mappings[".m3u8"] = "application/vnd.apple.mpegurl";
         contentTypes.Mappings[".ts"]   = "video/mp2t";
+        contentTypes.Mappings[".m4s"]  = "video/iso.segment";   // fMP4 media segment (CMAF)
+        contentTypes.Mappings[".mp4"]  = "video/mp4";            // fMP4 init segment
 
         app.UseStaticFiles(new StaticFileOptions
         {
             FileProvider        = new PhysicalFileProvider(liveDir),
             RequestPath         = "/live",
             ContentTypeProvider = contentTypes,
+            // Los segmentos HLS en vivo no deben cachearse — cambian cada segundo
+            OnPrepareResponse   = ctx =>
+            {
+                ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
+                ctx.Context.Response.Headers["Pragma"]        = "no-cache";
+                ctx.Context.Response.Headers["Expires"]       = "0";
+            }
         });
 
         return app;

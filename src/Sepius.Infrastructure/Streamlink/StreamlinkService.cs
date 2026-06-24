@@ -41,10 +41,32 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
     private readonly ILogger<StreamlinkService> _logger;
     private bool _disposed;
 
-    // Regex para validar nombres de canal de Twitch (solo alfanumérico + guión bajo, 1-25 chars)
+    // Regex para validar el nombre de canal (solo alfanumérico + guión bajo, 1-25 chars)
     // Se compila una vez como static readonly para rendimiento óptimo
     private static readonly Regex ValidChannelName = new(@"^[a-z0-9_]{1,25}$",
         RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    // Parsea "kick:elttblue" -> ("kick", "elttblue")
+    //         "twitch:elttblue" -> ("twitch", "elttblue")
+    //         "elttblue" -> ("twitch", "elttblue")  (retrocompatibilidad)
+    private static (string Platform, string Channel) ParseChannelInput(string input)
+    {
+        var colonIdx = input.IndexOf(':');
+        if (colonIdx > 0)
+        {
+            var platform = input[..colonIdx];
+            var channel  = input[(colonIdx + 1)..].TrimStart('/');
+            return (platform, channel);
+        }
+        return ("twitch", input);
+    }
+
+    private static string BuildStreamUrl(string platform, string channel) => platform switch
+    {
+        "kick"   => $"https://kick.com/{channel}",
+        "twitch" => $"https://www.twitch.tv/{channel}",
+        _        => $"https://www.twitch.tv/{channel}"
+    };
 
     public StreamlinkService(IOptions<StreamlinkOptions> options, ILogger<StreamlinkService> logger)
     {
@@ -61,11 +83,13 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
     /// </summary>
     public Task StartRecordingAsync(string channelName, CancellationToken ct = default)
     {
-        channelName = channelName.ToLowerInvariant();
+        channelName = channelName.ToLowerInvariant().Trim();
 
-        // SEGURIDAD: Validar el nombre antes de incluirlo en argumentos de proceso
+        var (platform, channel) = ParseChannelInput(channelName);
+
+        // SEGURIDAD: Validar solo el nombre de canal (sin prefijo de plataforma)
         // para prevenir inyección de comandos (OS Command Injection — OWASP A03)
-        if (!ValidChannelName.IsMatch(channelName))
+        if (!ValidChannelName.IsMatch(channel))
             throw new ArgumentException($"Nombre de canal inválido: '{channelName}'", nameof(channelName));
 
         if (_active.ContainsKey(channelName))
@@ -74,8 +98,8 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
             return Task.CompletedTask;
         }
 
-        // Crear directorio de salida por canal: /recordings/{channelName}/
-        var outputDir = Path.Combine(_options.OutputPath, channelName);
+        // Crear directorio de salida: /recordings/{platform}/{channel}/
+        var outputDir = Path.Combine(_options.OutputPath, platform, channel);
         Directory.CreateDirectory(outputDir);
 
         var fileName = $"{DateTime.UtcNow:yyyyMMdd_HHmmss}.mp4";
@@ -85,7 +109,7 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
         var psi = new ProcessStartInfo
         {
             FileName = _options.ExecutablePath,
-            Arguments = BuildArguments(channelName, outputPath),
+            Arguments = BuildArguments(platform, channel, outputPath),
             UseShellExecute = false,       // CRÍTICO: false para controlar el proceso
             RedirectStandardOutput = true, // Capturar stdout para logging
             RedirectStandardError = true,  // Streamlink escribe su progreso en stderr
@@ -245,11 +269,14 @@ public sealed class StreamlinkService : IStreamlinkService, IDisposable
         catch { /* No crítico si falla */ }
     }
 
-    private string BuildArguments(string channelName, string outputPath)
-        // Formato: streamlink twitch.tv/{channel} {quality} --output "{path}" {additionalArgs}
-        => $"twitch.tv/{channelName} {_options.Quality} " +
-           $"--output \"{outputPath}\" " +
-           $"{_options.AdditionalArgs}";
+    private string BuildArguments(string platform, string channel, string outputPath)
+    {
+        var url = BuildStreamUrl(platform, channel);
+        // Formato: streamlink {url} {quality} --output "{path}" {additionalArgs}
+        return $"{url} {_options.Quality} " +
+               $"--output \"{outputPath}\" " +
+               $"{_options.AdditionalArgs}";
+    }
 
     // ── DISPOSE — LIMPIEZA AL APAGAR ────────────────────────────────────────
     public void Dispose()

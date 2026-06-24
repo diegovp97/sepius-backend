@@ -31,9 +31,10 @@ builder.Services.AddInfrastructure(builder.Configuration);
 // AddHostedService = el host lo inicia/detiene automáticamente
 builder.Services.Configure<MonitorOptions>(
     builder.Configuration.GetSection(MonitorOptions.SectionName));
-// TwitchEventSubWorker reemplaza el polling de TwitchMonitorWorker.
-// TwitchMonitorWorker se mantiene en el proyecto como fallback pero no se registra.
+// TwitchEventSubWorker: eventos Twitch en tiempo real vía WebSocket
 builder.Services.AddHostedService<TwitchEventSubWorker>();
+// TwitchMonitorWorker: polling para plataformas no-Twitch (Kick)
+builder.Services.AddHostedService<TwitchMonitorWorker>();
 
 // Controladores con serialización de enums como strings
 // (envía "Completed" al frontend en lugar del entero 1)
