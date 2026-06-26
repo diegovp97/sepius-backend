@@ -62,9 +62,6 @@ public sealed class TwitchApiService : ITwitchApiService
         string eventType,
         CancellationToken ct = default)
     {
-        // Asegurarse de tener un app token válido antes de suscribir
-        await EnsureValidTokenAsync(ct);
-
         var body = new EventSubSubscriptionRequest
         {
             Type = eventType,
@@ -75,8 +72,12 @@ public sealed class TwitchApiService : ITwitchApiService
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{_options.ApiBaseUrl}/eventsub/subscriptions");
         request.Headers.TryAddWithoutValidation("Client-Id", _options.ClientId);
-        // App access token (Client Credentials) — válido para stream.online / stream.offline vía WebSocket
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {_accessToken}");
+        // User access token required for EventSub WebSocket subscriptions (stream.online/stream.offline).
+        // Falls back to app access token if UserAccessToken is not configured.
+        var authToken = !string.IsNullOrWhiteSpace(_options.UserAccessToken)
+            ? _options.UserAccessToken
+            : _accessToken;
+        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {authToken}");
         request.Content = JsonContent.Create(body);
 
         var response = await _httpClient.SendAsync(request, ct);
