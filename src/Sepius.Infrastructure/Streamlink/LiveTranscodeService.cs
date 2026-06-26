@@ -125,7 +125,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         // Calidad preferida: 720p60 si existe; si no, el mejor que haya.
         // -c copy: no recodificamos — Kick ya envía H.264+AAC compatible con HLS.
         // Ventajas: 0 CPU de encoding, sin stalls, sin latencia extra.
-        var quality = platform is "kick" ? "720p60,best" : "best";
+        var quality = platform is "kick" ? "720p60,best" : "720p60,720p,best";
 
         var slPsi = new ProcessStartInfo
         {
