@@ -138,8 +138,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             _      => $"https://www.twitch.tv/{channelName}",
         };
 
-        // Un solo streamlink, calidad limitada a 720p
-        var quality = platform is "kick" ? "720p60,best" : "720p60,720p,best";
+        var quality = "best";
 
         var slPsi = new ProcessStartInfo
         {

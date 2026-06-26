@@ -33,9 +33,10 @@ services:
       - ASPNETCORE_URLS=http://+:8080
       - TwitchApi__ClientId=${TWITCH_CLIENT_ID}
       - TwitchApi__ClientSecret=${TWITCH_CLIENT_SECRET}
-      # User access token — requerido para EventSub WebSocket.
-      # Obtenerlo: https://id.twitch.tv/oauth2/authorize?client_id=TU_CLIENT_ID&redirect_uri=http://localhost&response_type=token&scope=
+      # Authorization Code Flow — user access token + refresh token para EventSub WebSocket
       - TwitchApi__UserAccessToken=${TWITCH_USER_ACCESS_TOKEN:-}
+      - TwitchApi__RefreshToken=${TWITCH_REFRESH_TOKEN:-}
+      - TwitchApi__RedirectUri=${TWITCH_REDIRECT_URI:-http://localhost}
       - Streamlink__OutputPath=/recordings
       - Monitor__PollingIntervalSeconds=120
       - Monitor__Channels__0=elttblue
