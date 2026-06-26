@@ -126,112 +126,82 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             _      => $"https://www.twitch.tv/{channelName}",
         };
 
-        var quality = "best";
+        var quality   = "best";
+        var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
 
-        var slPsi = new ProcessStartInfo
+        var slCmd = $"{_options.ExecutablePath} {streamUrl} {quality} --stdout 2>/tmp/sl_{sessionId}.log";
+        var ffArgs = string.Join(" ",
+            "-y",
+            "-fflags +discardcorrupt+genpts",
+            "-analyzeduration 10000000",
+            "-probesize 5000000",
+            "-i pipe:0",
+            "-map 0:v",
+            "-map 0:a?",
+            "-c copy",
+            "-f hls",
+            "-hls_time 4",
+            "-hls_list_size 20",
+            "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
+            "-hls_allow_cache 0",
+            "-max_muxing_queue_size 1024",
+            $"-hls_segment_filename \"{segPattern}\"",
+            $"\"{m3u8Path}\"",
+            "-c copy",
+            "-movflags +faststart",
+            "-max_muxing_queue_size 1024",
+            $"\"{mp4Path}\"");
+
+        var bashCmd = $"trap 'kill -INT 0' INT TERM; {slCmd} | \"{_options.FfmpegPath}\" {ffArgs} 2>&1; wait";
+
+        var psi = new ProcessStartInfo
         {
-            FileName               = _options.ExecutablePath,
-            Arguments              = $"{streamUrl} {quality} --stdout",
+            FileName               = "/bin/bash",
+            Arguments              = $"-c \"{bashCmd}\"",
             UseShellExecute        = false,
-            RedirectStandardOutput = true,
             RedirectStandardError  = true,
             CreateNoWindow         = true
         };
 
-        var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
-
-        // ffmpeg escribe HLS + MP4 en la misma pasada (sin segundo streamlink)
-        var ffPsi = new ProcessStartInfo
-        {
-            FileName = _options.FfmpegPath,
-            Arguments = string.Join(" ",
-                "-y",
-                "-i pipe:0",
-                "-map 0:v",
-                "-map 0:a",
-                "-c copy",
-                // Salida 1: HLS
-                "-f hls",
-                "-hls_time 4",
-                "-hls_list_size 20",
-                "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
-                "-hls_allow_cache 0",
-                $"-hls_segment_filename \"{segPattern}\"",
-                $"\"{m3u8Path}\"",
-                // Salida 2: MP4 grabación (copia directa, 0 CPU extra)
-                "-c copy",
-                "-movflags +faststart",
-                $"\"{mp4Path}\""),
-            UseShellExecute       = false,
-            RedirectStandardInput = true,
-            RedirectStandardError = true,
-            CreateNoWindow        = true
-        };
-
-        var sl = new Process { StartInfo = slPsi, EnableRaisingEvents = true };
-        var ff = new Process { StartInfo = ffPsi, EnableRaisingEvents = true };
+        var proc = new Process { StartInfo = psi, EnableRaisingEvents = true };
 
         try
         {
-            sl.ErrorDataReceived += (_, e) =>
-            {
-                if (e.Data is null) return;
-                _logger.LogDebug("[{Key}|sl] {L}", key, e.Data);
-
-                if (e.Data.Contains("No playable streams found", StringComparison.OrdinalIgnoreCase))
-                {
-                    _logger.LogWarning("[Transcode] Streamlink: no hay streams para '{Key}'. Abortando.", key);
-                    session.Status = TranscodeStatus.Failed;
-                    KillSession(session, key);
-                }
-
-                if (e.Data.Contains("Available streams:", StringComparison.OrdinalIgnoreCase))
-                    _logger.LogInformation("[Transcode] Streams disponibles en '{Key}': {Streams}", key, e.Data);
-
-                if (e.Data.Contains("Opening stream:", StringComparison.OrdinalIgnoreCase))
-                    _logger.LogInformation("[Transcode] Streamlink abriendo stream '{Key}': {Info}", key, e.Data);
-            };
-
-            ff.ErrorDataReceived += (_, e) =>
+            proc.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data is null) return;
                 if (e.Data.StartsWith("frame=", StringComparison.OrdinalIgnoreCase)) return;
-                _logger.LogDebug("[{Key}|ff] {L}", key, e.Data);
+
+                if (e.Data.Contains("Available streams:", StringComparison.OrdinalIgnoreCase))
+                    _logger.LogInformation("[Transcode] Streams disponibles en '{Key}': {Streams}", key, e.Data);
+                else if (e.Data.Contains("Opening stream:", StringComparison.OrdinalIgnoreCase))
+                    _logger.LogInformation("[Transcode] Streamlink abriendo stream '{Key}': {Info}", key, e.Data);
+                else if (e.Data.Contains("No playable streams found", StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogWarning("[Transcode] Streamlink: no hay streams para '{Key}'. Abortando.", key);
+                    session.Status = TranscodeStatus.Failed;
+                }
+                else
+                    _logger.LogDebug("[{Key}|pipe] {L}", key, e.Data);
             };
 
-            sl.Start();
-            sl.BeginErrorReadLine();
+            proc.Start();
+            proc.BeginErrorReadLine();
 
-            ff.Start();
-            ff.BeginErrorReadLine();
-
-            session.StreamlinkProcess = sl;
-            session.FfmpegProcess     = ff;
-            session.Status            = TranscodeStatus.Running;
+            session.PipelineProcess = proc;
+            session.Status          = TranscodeStatus.Running;
 
             _logger.LogInformation(
-                "[Transcode] Pipeline activo. Key='{Key}' | sl.PID={SlPid} | ff.PID={FfPid} | HLS={M3u8} | MP4={Mp4}",
-                key, sl.Id, ff.Id, m3u8Path, mp4Path);
+                "[Transcode] Pipeline activo. Key='{Key}' | PID={Pid} | HLS={M3u8} | MP4={Mp4}",
+                key, proc.Id, m3u8Path, mp4Path);
 
-            // Pipe stdout de streamlink → stdin de ffmpeg
-            _ = sl.StandardOutput.BaseStream
-                .CopyToAsync(ff.StandardInput.BaseStream, ct)
-                .ContinueWith(_ =>
-                {
-                    try { ff.StandardInput.Close(); } catch { }
-                }, TaskScheduler.Default);
-
-            // Health watchdog: comprueba procesos cada 30s
             StartWatchdog(key, session, ct);
 
-            await Task.WhenAny(
-                sl.WaitForExitAsync(ct),
-                ff.WaitForExitAsync(ct)).ConfigureAwait(false);
+            await proc.WaitForExitAsync(ct).ConfigureAwait(false);
 
             _logger.LogWarning(
-                "[Transcode] Proceso terminado para '{Key}'. sl={SlCode} ff={FfCode}",
-                key, sl.HasExited ? sl.ExitCode : -1,
-                ff.HasExited ? ff.ExitCode : -1);
+                "[Transcode] Proceso terminado para '{Key}'. exit={ExitCode}",
+                key, proc.HasExited ? proc.ExitCode : -1);
         }
         catch (OperationCanceledException)
         {
@@ -266,16 +236,14 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
                     if (session.Status != TranscodeStatus.Running) break;
 
-                    var slAlive = session.StreamlinkProcess is { HasExited: false };
-                    var ffAlive = session.FfmpegProcess is { HasExited: false };
+                    var alive = session.PipelineProcess is { HasExited: false };
 
-                    if (!slAlive || !ffAlive)
+                    if (!alive)
                     {
                         _logger.LogWarning(
-                            "[Watchdog] Proceso muerto para '{Key}'. slAlive={Sl} ffAlive={Ff}. Marcando como Failed.",
-                            key, slAlive, ffAlive);
+                            "[Watchdog] Proceso muerto para '{Key}'. Marcando como Failed.",
+                            key);
                         session.Status = TranscodeStatus.Failed;
-                        KillSession(session, key);
                         break;
                     }
                 }
@@ -311,8 +279,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         _logger.LogInformation("[Transcode] Limpiando '{Key}'. Estado={Status}", key, finalStatus);
 
         KillSession(session, key);
-        session.StreamlinkProcess?.Dispose();
-        session.FfmpegProcess?.Dispose();
+        session.PipelineProcess?.Dispose();
 
         // Si la grabación MP4 existe y el stream terminó correctamente, notificar
         if (finalStatus == TranscodeStatus.Stopped && File.Exists(mp4Path))
@@ -338,8 +305,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     private void KillSession(TranscodeSession session, string key)
     {
-        KillSafely(session.StreamlinkProcess, $"{key}-streamlink");
-        KillSafely(session.FfmpegProcess,     $"{key}-ffmpeg");
+        KillSafely(session.PipelineProcess, $"{key}-pipeline");
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
@@ -381,8 +347,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         {
             if (!process.HasExited)
             {
-                // En Linux: SIGINT para que ffmpeg finalice el MP4 (escribe moov atom)
-                // kill -INT <pid> es la forma más fiable de enviar SIGINT
+                // SIGINT al proceso bash → trap lo reenvía a streamlink+ffmpeg vía kill -INT 0
                 try
                 {
                     var killPsi = new System.Diagnostics.ProcessStartInfo
@@ -446,8 +411,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         foreach (var (key, session) in _active)
         {
             KillSession(session, key);
-            session.StreamlinkProcess?.Dispose();
-            session.FfmpegProcess?.Dispose();
+            session.PipelineProcess?.Dispose();
         }
 
         _active.Clear();

@@ -12,15 +12,14 @@ public enum TranscodeStatus
 }
 
 /// <summary>
-/// Representa una sesión activa de transcode (streamlink + ffmpeg) para un canal.
-/// Guarda referencia a ambos procesos y el estado actual.
+/// Representa una sesión activa de transcode para un canal.
+/// Un único proceso bash ejecuta: streamlink --stdout | ffmpeg -i pipe:0
 /// </summary>
 public sealed class TranscodeSession
 {
     public string Channel { get; }
     public TranscodeStatus Status { get; set; }
-    public Process? StreamlinkProcess { get; set; }
-    public Process? FfmpegProcess { get; set; }
+    public Process? PipelineProcess { get; set; }
     public DateTimeOffset StartedAt { get; } = DateTimeOffset.UtcNow;
 
     public TranscodeSession(string channel)
