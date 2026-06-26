@@ -42,13 +42,6 @@ public static class DependencyInjection
         services.Configure<StreamlinkOptions>(
             configuration.GetSection(StreamlinkOptions.SectionName));
 
-        // ── CLOUDFLARE R2 (HLS storage persistente) ───────────────────────────
-        services.Configure<R2Options>(configuration.GetSection(R2Options.SectionName));
-        services.AddHttpClient("R2", client =>
-        {
-            client.Timeout = TimeSpan.FromSeconds(30);
-        });
-
         // ── REPOSITORIOS (Singleton) ─────────────────────────────────────────
         // Singleton = una sola instancia para toda la vida de la app.
         // Correcto para almacenamiento en memoria que debe persistir entre requests.
@@ -61,9 +54,6 @@ public static class DependencyInjection
 
         // Singleton para el pipeline streamlink→ffmpeg→HLS (también IDisposable)
         services.AddSingleton<ILiveTranscodeService, LiveTranscodeService>();
-
-        // R2SyncService: sube HLS a Cloudflare R2 en background
-        services.AddHostedService<R2SyncService>();
 
         // ── HTTP CLIENT (Twitch API) ─────────────────────────────────────────
         // AddHttpClient registra TwitchApiService como Singleton con un HttpClient

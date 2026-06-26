@@ -24,7 +24,6 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     private readonly ConcurrentDictionary<string, CancellationTokenSource> _watchdogs = new();
 
     private readonly StreamlinkOptions _options;
-    private readonly R2Options _r2;
     private readonly ILogger<LiveTranscodeService> _logger;
     private bool _disposed;
 
@@ -33,10 +32,9 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     public event Func<Recording, Task>? RecordingCompleted;
 
-    public LiveTranscodeService(IOptions<StreamlinkOptions> options, IOptions<R2Options> r2, ILogger<LiveTranscodeService> logger)
+    public LiveTranscodeService(IOptions<StreamlinkOptions> options, ILogger<LiveTranscodeService> logger)
     {
         _options = options.Value;
-        _r2 = r2.Value;
         _logger = logger;
     }
 
@@ -54,22 +52,12 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         var key = MakeKey(NormalizePlatform(platform), Normalize(channelName));
         if (!_active.ContainsKey(key)) return false;
 
-        if (_r2.Enabled)
-        {
-            // Cuando R2 está activo, verificamos que exista el m3u8 local
-            // (el R2SyncService lo subirá automáticamente)
-            var m3u8 = GetM3u8Path(NormalizePlatform(platform), Normalize(channelName));
-            return File.Exists(m3u8) && new FileInfo(m3u8).Length > 0;
-        }
-
-        var m3u8Local = GetM3u8Path(NormalizePlatform(platform), Normalize(channelName));
-        return File.Exists(m3u8Local) && new FileInfo(m3u8Local).Length > 0;
+        var m3u8 = GetM3u8Path(NormalizePlatform(platform), Normalize(channelName));
+        return File.Exists(m3u8) && new FileInfo(m3u8).Length > 0;
     }
 
     public string GetHlsUrl(string channelName, string platform = "twitch")
     {
-        if (_r2.Enabled)
-            return $"{_r2.PublicBaseUrl.TrimEnd('/')}/{NormalizePlatform(platform)}/{Normalize(channelName)}/index.m3u8";
         return $"/live/{NormalizePlatform(platform)}/{Normalize(channelName)}/index.m3u8";
     }
 

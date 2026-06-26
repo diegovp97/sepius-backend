@@ -43,12 +43,6 @@ services:
       - Monitor__Channels__1=kick:elttblue
       - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
       - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
-      # Cloudflare R2 — HLS storage persistente (deshabilitado temporalmente)
-      # - CloudflareR2__AccountId=${CloudflareR2__AccountId:-}
-      # - CloudflareR2__AccessKeyId=${CloudflareR2__AccessKeyId:-}
-      # - CloudflareR2__SecretAccessKey=${CloudflareR2__SecretAccessKey:-}
-      # - CloudflareR2__BucketName=${CloudflareR2__BucketName:-sepius-db}
-      # - CloudflareR2__PublicBaseUrl=${CloudflareR2__PublicBaseUrl:-}
     volumes:
       - recordings_data:/recordings
     healthcheck:
