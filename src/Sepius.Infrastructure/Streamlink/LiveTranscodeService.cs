@@ -381,9 +381,25 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         {
             if (!process.HasExited)
             {
-                // SIGINT para que ffmpeg finalice el MP4 (escribe moov atom)
-                process.CloseMainWindow();
-                process.WaitForExit(5_000);
+                // En Linux: SIGINT para que ffmpeg finalice el MP4 (escribe moov atom)
+                // kill -INT <pid> es la forma más fiable de enviar SIGINT
+                try
+                {
+                    var killPsi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "kill",
+                        Arguments = $"-INT {process.Id}",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    var killProc = System.Diagnostics.Process.Start(killPsi);
+                    killProc?.WaitForExit(3_000);
+                }
+                catch { }
+
+                process.WaitForExit(10_000);
 
                 if (!process.HasExited)
                 {
