@@ -3,6 +3,7 @@ using System.Text;
 using Amazon;
 using Amazon.S3;
 using Amazon.S3.Model;
+using Amazon.S3.Transfer;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -18,7 +19,7 @@ public sealed class R2SyncService : BackgroundService
     private readonly R2Options _r2;
     private readonly StreamlinkOptions _sl;
     private readonly ILogger<R2SyncService> _logger;
-    private readonly IAmazonS3 _s3;
+    private IAmazonS3? _s3;
     private readonly ConcurrentDictionary<string, HashSet<string>> _uploadedSegments = new();
 
     public R2SyncService(
@@ -29,14 +30,6 @@ public sealed class R2SyncService : BackgroundService
         _r2 = r2.Value;
         _sl = sl.Value;
         _logger = logger;
-
-        var config = new AmazonS3Config
-        {
-            ServiceURL = _r2.EndpointUrl,
-            ForcePathStyle = true,
-            AuthenticationRegion = RegionEndpoint.USEast1.SystemName
-        };
-        _s3 = new AmazonS3Client(_r2.AccessKeyId, _r2.SecretAccessKey, config);
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -46,6 +39,14 @@ public sealed class R2SyncService : BackgroundService
             _logger.LogInformation("[R2] Deshabilitado (sin credenciales). HLS se sirve localmente.");
             return;
         }
+
+        var config = new AmazonS3Config
+        {
+            ServiceURL = _r2.EndpointUrl,
+            ForcePathStyle = true,
+            AuthenticationRegion = RegionEndpoint.USEast1.SystemName
+        };
+        _s3 = new AmazonS3Client(_r2.AccessKeyId, _r2.SecretAccessKey, config);
 
         var liveDir = Path.Combine(_sl.OutputPath, "live");
         Directory.CreateDirectory(liveDir);
@@ -115,33 +116,39 @@ public sealed class R2SyncService : BackgroundService
                 }
             }
 
-            // Subir m3u8 reescrito
             var m3u8Key = $"{platform}/{channel}/index.m3u8";
-            var m3u8Bytes = Encoding.UTF8.GetBytes(rewritten.ToString());
-            using var m3u8Stream = new MemoryStream(m3u8Bytes);
-            await _s3.PutObjectAsync(new PutObjectRequest
+            var tmpM3u8 = Path.GetTempFileName();
+            try
             {
-                BucketName = _r2.BucketName,
-                Key = m3u8Key,
-                InputStream = m3u8Stream,
-                ContentType = "application/vnd.apple.mpegurl"
-            }, ct);
+                await File.WriteAllTextAsync(tmpM3u8, rewritten.ToString(), ct);
+                var transfer = new TransferUtility(_s3);
+                await transfer.UploadAsync(new TransferUtilityUploadRequest
+                {
+                    BucketName = _r2.BucketName,
+                    Key = m3u8Key,
+                    FilePath = tmpM3u8,
+                    ContentType = "application/vnd.apple.mpegurl"
+                }, ct);
+            }
+            finally
+            {
+                File.Delete(tmpM3u8);
+            }
 
             _logger.LogDebug("[R2] Uploaded m3u8: {Key}", m3u8Key);
 
-            // Subir segmentos nuevos
             foreach (var seg in newSegments)
             {
                 var localSeg = Path.Combine(Path.GetDirectoryName(m3u8Path)!, seg);
                 if (File.Exists(localSeg))
                 {
                     var segKey = $"{platform}/{channel}/{seg}";
-                    await using var segStream = File.OpenRead(localSeg);
-                    await _s3.PutObjectAsync(new PutObjectRequest
+                    var transfer = new TransferUtility(_s3);
+                    await transfer.UploadAsync(new TransferUtilityUploadRequest
                     {
                         BucketName = _r2.BucketName,
                         Key = segKey,
-                        InputStream = segStream,
+                        FilePath = localSeg,
                         ContentType = "video/mp2t"
                     }, ct);
                     _logger.LogDebug("[R2] Uploaded segment: {Key}", segKey);
