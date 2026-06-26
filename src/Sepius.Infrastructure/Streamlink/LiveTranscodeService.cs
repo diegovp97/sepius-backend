@@ -160,6 +160,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                 $"\"{m3u8Path}\"",
                 // Salida 2: MP4 grabación (copia directa, 0 CPU extra)
                 "-c copy",
+                "-movflags +faststart",
                 $"\"{mp4Path}\""),
             UseShellExecute       = false,
             RedirectStandardInput = true,
@@ -380,8 +381,15 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         {
             if (!process.HasExited)
             {
-                process.Kill(entireProcessTree: true);
+                // SIGINT para que ffmpeg finalice el MP4 (escribe moov atom)
+                process.CloseMainWindow();
                 process.WaitForExit(5_000);
+
+                if (!process.HasExited)
+                {
+                    process.Kill(entireProcessTree: true);
+                    process.WaitForExit(5_000);
+                }
             }
         }
         catch (InvalidOperationException) { }
