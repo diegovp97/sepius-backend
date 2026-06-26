@@ -181,7 +181,9 @@ public sealed class TwitchApiService : ITwitchApiService
                 ?? throw new InvalidOperationException("Respuesta de token de Twitch vacía.");
 
             _accessToken = tokenData.AccessToken;
-            _tokenExpiry = DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn);
+            _tokenExpiry = tokenData.ExpiresIn > 0
+                ? DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn)
+                : DateTime.UtcNow.AddHours(1);
 
             _logger.LogInformation("App access token renovado. Expira: {Expiry:u}", _tokenExpiry);
         }
@@ -255,7 +257,9 @@ public sealed class TwitchApiService : ITwitchApiService
                 ?? throw new InvalidOperationException("Respuesta de token de Twitch vacía.");
 
             _userAccessToken = tokenData.AccessToken;
-            _userTokenExpiry = DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn);
+            _userTokenExpiry = tokenData.ExpiresIn > 0
+                ? DateTime.UtcNow.AddSeconds(tokenData.ExpiresIn)
+                : DateTime.UtcNow.AddHours(1);
 
             // Twitch devuelve un nuevo refresh_token en cada refresh
             if (!string.IsNullOrWhiteSpace(tokenData.RefreshToken))

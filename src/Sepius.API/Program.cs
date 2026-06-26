@@ -63,6 +63,8 @@ builder.Services.AddCors(options =>
         policy
             .SetIsOriginAllowed(origin =>
             {
+                if (origins.Contains("*"))
+                    return true;
                 // En desarrollo: cualquier puerto de localhost está permitido
                 if (Uri.TryCreate(origin, UriKind.Absolute, out var uri) &&
                     (uri.Host == "localhost" || uri.Host == "127.0.0.1"))
@@ -103,8 +105,9 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Sepius v1"));
 }
 
-app.UseHttpsRedirection();
+// CORS ANTES de HTTPS redirect y cualquier otro middleware que responda
 app.UseCors("Angular");
+app.UseHttpsRedirection();
 
 // Servir los ficheros HLS estáticos (/live/{channel}/index.m3u8 y segmentos .ts)
 // DEBE ir después de UseCors para que los headers CORS se apliquen
