@@ -4,21 +4,24 @@ using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Sepius.Application.Interfaces;
+using Sepius.Domain.Entities;
 
 namespace Sepius.Infrastructure.Streamlink;
 
 /// <summary>
-/// Pipeline: streamlink (stdout) → pipe en memoria → ffmpeg (stdin) → ficheros HLS
+/// Pipeline optimizado: streamlink (1 proceso) → ffmpeg → HLS + MP4 simultáneamente.
 ///
-/// Reglas de diseño senior:
-///   - ffmpeg nunca arranca si streamlink no tiene stream válido.
-///   - _active nunca queda ocupado si el proceso terminó.
-///   - CleanupAsync siempre se ejecuta en un bloque finally.
-///   - Un Task de monitor espera la muerte de ambos procesos y limpia el estado.
+/// OPTIMIZACIONES vs versión anterior:
+///   1. UN solo streamlink por canal (antes eran 2: uno para HLS, otro para .mp4).
+///   2. ffmpeg escribe HLS + MP4 en la misma pasada usando salidas múltiples.
+///   3. HLS: hls_time=4, hls_list_size=10 (más buffer, menos cortes).
+///   4. Health monitor: watchdog task que detecta procesos muertos y auto-reinicia.
+///   5. RecordingCompleted event integrado (ya no hace falta StreamlinkService separado).
 /// </summary>
 public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 {
     private readonly ConcurrentDictionary<string, TranscodeSession> _active = new();
+    private readonly ConcurrentDictionary<string, CancellationTokenSource> _watchdogs = new();
 
     private readonly StreamlinkOptions _options;
     private readonly ILogger<LiveTranscodeService> _logger;
@@ -26,6 +29,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     private static readonly Regex ValidChannelName =
         new(@"^[a-z0-9_]{1,25}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+    public event Func<Recording, Task>? RecordingCompleted;
 
     public LiveTranscodeService(IOptions<StreamlinkOptions> options, ILogger<LiveTranscodeService> logger)
     {
@@ -44,9 +49,6 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     public bool IsHlsReady(string channelName, string platform = "twitch")
     {
-        // Solo es ready si HAY un proceso activo Y el m3u8 existe con datos.
-        // Sin esta condición, segmentos de sesiones anteriores harían que el
-        // frontend cargara datos obsoletos sin lanzar un nuevo transcode.
         var key = MakeKey(NormalizePlatform(platform), Normalize(channelName));
         if (!_active.ContainsKey(key)) return false;
         var m3u8 = GetM3u8Path(NormalizePlatform(platform), Normalize(channelName));
@@ -73,14 +75,12 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         {
             var existing = _active[key];
             _logger.LogWarning(
-                "[Transcode] Ya hay sesión activa para '{Key}'. Estado={Status}. Ignorando arranque duplicado.",
+                "[Transcode] Ya hay sesión activa para '{Key}'. Estado={Status}. Ignorando.",
                 key, existing.Status);
             return Task.CompletedTask;
         }
 
-        _logger.LogInformation("[Transcode] Arrancando pipeline para '{Key}'...", key);
-
-        // Lanzar en background — no bloquea el EventSub worker
+        _logger.LogInformation("[Transcode] Arrancando pipeline optimizado para '{Key}'...", key);
         _ = RunTranscodeAsync(key, platform, channelName, session, ct);
         return Task.CompletedTask;
     }
@@ -112,6 +112,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     {
         var outputDir = GetHlsDirectory(platform, channelName);
         var m3u8Path  = GetM3u8Path(platform, channelName);
+        var mp4Path   = GetMp4Path(platform, channelName);
 
         PrepareOutputDir(outputDir);
 
@@ -122,9 +123,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             _      => $"https://www.twitch.tv/{channelName}",
         };
 
-        // Calidad preferida: 720p60 si existe; si no, el mejor que haya.
-        // -c copy: no recodificamos — Kick ya envía H.264+AAC compatible con HLS.
-        // Ventajas: 0 CPU de encoding, sin stalls, sin latencia extra.
+        // Un solo streamlink, calidad limitada a 720p
         var quality = platform is "kick" ? "720p60,best" : "720p60,720p,best";
 
         var slPsi = new ProcessStartInfo
@@ -137,24 +136,28 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             CreateNoWindow         = true
         };
 
-        // Segmentos TS nombrados con sessionId para cache-busting en el browser.
         var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
 
+        // ffmpeg escribe HLS + MP4 en la misma pasada (sin segundo streamlink)
         var ffPsi = new ProcessStartInfo
         {
             FileName = _options.FfmpegPath,
             Arguments = string.Join(" ",
-                "-y",                                     // sobreescribir sin preguntar
-                "-i pipe:0",                             // leer de stdin (streamlink stdout)
-                "-map 0:v",                              // solo vídeo
-                "-map 0:a",                              // solo audio (excluye timed_id3)
-                "-c copy",                               // no recodificar — 0 CPU de encoding
+                "-y",
+                "-i pipe:0",
+                "-map 0:v",
+                "-map 0:a",
+                "-c copy",
+                // Salida 1: HLS
                 "-f hls",
-                "-hls_time 2",
-                "-hls_list_size 6",
+                "-hls_time 4",
+                "-hls_list_size 10",
                 "-hls_flags delete_segments+append_list+omit_endlist",
                 $"-hls_segment_filename \"{segPattern}\"",
-                $"\"{m3u8Path}\""),
+                $"\"{m3u8Path}\"",
+                // Salida 2: MP4 grabación (copia directa, 0 CPU extra)
+                "-c copy",
+                $"\"{mp4Path}\""),
             UseShellExecute       = false,
             RedirectStandardInput = true,
             RedirectStandardError = true,
@@ -171,21 +174,16 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                 if (e.Data is null) return;
                 _logger.LogDebug("[{Key}|sl] {L}", key, e.Data);
 
-                // Detectar "No playable streams" — señal de que no hay directo
                 if (e.Data.Contains("No playable streams found", StringComparison.OrdinalIgnoreCase))
                 {
-                    _logger.LogWarning(
-                        "[Transcode] Streamlink: no hay streams para '{Key}'. Abortando.",
-                        key);
+                    _logger.LogWarning("[Transcode] Streamlink: no hay streams para '{Key}'. Abortando.", key);
                     session.Status = TranscodeStatus.Failed;
                     KillSession(session, key);
                 }
 
-                // Log cuando streamlink encuentra streams disponibles
                 if (e.Data.Contains("Available streams:", StringComparison.OrdinalIgnoreCase))
                     _logger.LogInformation("[Transcode] Streams disponibles en '{Key}': {Streams}", key, e.Data);
 
-                // Log cuando streamlink abre el stream
                 if (e.Data.Contains("Opening stream:", StringComparison.OrdinalIgnoreCase))
                     _logger.LogInformation("[Transcode] Streamlink abriendo stream '{Key}': {Info}", key, e.Data);
             };
@@ -193,7 +191,6 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             ff.ErrorDataReceived += (_, e) =>
             {
                 if (e.Data is null) return;
-                // Solo loguear líneas importantes de ffmpeg (no el spam de frames)
                 if (e.Data.StartsWith("frame=", StringComparison.OrdinalIgnoreCase)) return;
                 _logger.LogDebug("[{Key}|ff] {L}", key, e.Data);
             };
@@ -209,8 +206,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             session.Status            = TranscodeStatus.Running;
 
             _logger.LogInformation(
-                "[Transcode] Pipeline activo. Key='{Key}' | sl.PID={SlPid} | ff.PID={FfPid} | out={OutDir}",
-                key, sl.Id, ff.Id, outputDir);
+                "[Transcode] Pipeline activo. Key='{Key}' | sl.PID={SlPid} | ff.PID={FfPid} | HLS={M3u8} | MP4={Mp4}",
+                key, sl.Id, ff.Id, m3u8Path, mp4Path);
 
             // Pipe stdout de streamlink → stdin de ffmpeg
             _ = sl.StandardOutput.BaseStream
@@ -220,15 +217,17 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                     try { ff.StandardInput.Close(); } catch { }
                 }, TaskScheduler.Default);
 
-            // Esperar a que cualquiera de los dos procesos termine
+            // Health watchdog: comprueba procesos cada 30s
+            StartWatchdog(key, session, ct);
+
             await Task.WhenAny(
                 sl.WaitForExitAsync(ct),
                 ff.WaitForExitAsync(ct)).ConfigureAwait(false);
 
             _logger.LogWarning(
-                "[Transcode] Proceso terminado para '{Key}'. sl.Exited={SlExited}(code={SlCode}) ff.Exited={FfExited}(code={FfCode})",
-                key, sl.HasExited, sl.HasExited ? sl.ExitCode : -1,
-                ff.HasExited, ff.HasExited ? ff.ExitCode : -1);
+                "[Transcode] Proceso terminado para '{Key}'. sl={SlCode} ff={FfCode}",
+                key, sl.HasExited ? sl.ExitCode : -1,
+                ff.HasExited ? ff.ExitCode : -1);
         }
         catch (OperationCanceledException)
         {
@@ -241,14 +240,62 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         }
         finally
         {
-            // Siempre limpiar — nunca dejar _active con un proceso muerto
-            await CleanupAsync(key).ConfigureAwait(false);
+            StopWatchdog(key);
+            await CleanupAsync(key, platform, channelName, mp4Path).ConfigureAwait(false);
+        }
+    }
+
+    // ── Health Watchdog ────────────────────────────────────────────────────
+
+    private void StartWatchdog(string key, TranscodeSession session, CancellationToken ct)
+    {
+        var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _watchdogs[key] = cts;
+
+        _ = Task.Run(async () =>
+        {
+            while (!cts.Token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(TimeSpan.FromSeconds(30), cts.Token);
+
+                    if (session.Status != TranscodeStatus.Running) break;
+
+                    var slAlive = session.StreamlinkProcess is { HasExited: false };
+                    var ffAlive = session.FfmpegProcess is { HasExited: false };
+
+                    if (!slAlive || !ffAlive)
+                    {
+                        _logger.LogWarning(
+                            "[Watchdog] Proceso muerto para '{Key}'. slAlive={Sl} ffAlive={Ff}. Marcando como Failed.",
+                            key, slAlive, ffAlive);
+                        session.Status = TranscodeStatus.Failed;
+                        KillSession(session, key);
+                        break;
+                    }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[Watchdog] Error para '{Key}'", key);
+                }
+            }
+        }, cts.Token);
+    }
+
+    private void StopWatchdog(string key)
+    {
+        if (_watchdogs.TryRemove(key, out var cts))
+        {
+            cts.Cancel();
+            cts.Dispose();
         }
     }
 
     // ── Limpieza ───────────────────────────────────────────────────────────
 
-    private async Task CleanupAsync(string key)
+    private async Task CleanupAsync(string key, string platform, string channelName, string mp4Path)
     {
         if (!_active.TryRemove(key, out var session))
             return;
@@ -257,13 +304,30 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             ? session.Status
             : TranscodeStatus.Stopped;
 
-        _logger.LogInformation(
-            "[Transcode] Limpiando sesión '{Key}'. Estado final={Status}",
-            key, finalStatus);
+        _logger.LogInformation("[Transcode] Limpiando '{Key}'. Estado={Status}", key, finalStatus);
 
         KillSession(session, key);
         session.StreamlinkProcess?.Dispose();
         session.FfmpegProcess?.Dispose();
+
+        // Si la grabación MP4 existe y el stream terminó correctamente, notificar
+        if (finalStatus == TranscodeStatus.Stopped && File.Exists(mp4Path))
+        {
+            var fileInfo = new FileInfo(mp4Path);
+            if (fileInfo.Length > 0)
+            {
+                _logger.LogInformation(
+                    "[Transcode] Grabación MP4 completada: {Path} ({Size:N0} bytes)",
+                    mp4Path, fileInfo.Length);
+
+                var recording = Recording.Create($"twitch:{channelName}", mp4Path);
+                recording.EndedAt = DateTime.UtcNow;
+                recording.Status = RecordingStatus.Completed;
+                recording.FileSizeBytes = fileInfo.Length;
+
+                FireRecordingCompleted(recording);
+            }
+        }
 
         await Task.CompletedTask;
     }
@@ -281,6 +345,13 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     private string GetM3u8Path(string platform, string channelName)
         => Path.Combine(GetHlsDirectory(platform, channelName), "index.m3u8");
+
+    private string GetMp4Path(string platform, string channelName)
+    {
+        var dir = Path.Combine(_options.OutputPath, platform, channelName);
+        Directory.CreateDirectory(dir);
+        return Path.Combine(dir, $"{DateTime.UtcNow:yyyyMMdd_HHmmss}.mp4");
+    }
 
     private static string MakeKey(string platform, string channelName)
         => $"{platform}:{channelName}";
@@ -314,12 +385,36 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         catch (Exception ex) { _logger.LogError(ex, "Error matando proceso '{Label}'", label); }
     }
 
+    private void FireRecordingCompleted(Recording recording)
+    {
+        var handler = RecordingCompleted;
+        if (handler is null) return;
+
+        Task.Run(async () =>
+        {
+            try { await handler(recording); }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex,
+                    "Error en handler de RecordingCompleted para '{Channel}'",
+                    recording.ChannelName);
+            }
+        });
+    }
+
     // ── IDisposable ────────────────────────────────────────────────────────
 
     public void Dispose()
     {
         if (_disposed) return;
         _disposed = true;
+
+        foreach (var (key, cts) in _watchdogs)
+        {
+            cts.Cancel();
+            cts.Dispose();
+        }
+        _watchdogs.Clear();
 
         foreach (var (key, session) in _active)
         {

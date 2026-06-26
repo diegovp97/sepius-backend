@@ -179,8 +179,6 @@ public sealed class TwitchEventSubWorker : BackgroundService
 
         using var scope        = _scopeFactory.CreateAsyncScope();
         var liveTranscode      = scope.ServiceProvider.GetRequiredService<ILiveTranscodeService>();
-        var streamlink         = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
-        var recordingKey       = $"twitch:{channelLogin}";
 
         switch (eventType)
         {
@@ -188,14 +186,11 @@ public sealed class TwitchEventSubWorker : BackgroundService
                 _logger.LogInformation("'{Channel}' está en DIRECTO (EventSub). Iniciando HLS + grabación.", channelLogin);
                 if (!liveTranscode.IsTranscoding(channelLogin, "twitch"))
                     await liveTranscode.StartAsync(channelLogin, "twitch", ct);
-                if (!streamlink.IsRecording(recordingKey))
-                    await streamlink.StartRecordingAsync(recordingKey, ct);
                 break;
 
             case "stream.offline":
-                _logger.LogInformation("'{Channel}' ha terminado el directo (EventSub). Deteniendo HLS + grabación.", channelLogin);
+                _logger.LogInformation("'{Channel}' ha terminado el directo (EventSub). Deteniendo HLS.", channelLogin);
                 await liveTranscode.StopAsync(channelLogin, "twitch");
-                await streamlink.StopRecordingAsync(recordingKey);
                 break;
 
             default:
@@ -271,10 +266,6 @@ public sealed class TwitchEventSubWorker : BackgroundService
                             channel.Name);
                         await liveTranscode.StartAsync(twitchLogin, "twitch", ct);
                     }
-                    var recordingKey = $"twitch:{twitchLogin}";
-                    var streamlink2  = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
-                    if (!streamlink2.IsRecording(recordingKey))
-                        await streamlink2.StartRecordingAsync(recordingKey, ct);
                 }
             }
             catch (Exception ex) when (ex is not OperationCanceledException)

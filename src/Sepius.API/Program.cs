@@ -115,4 +115,21 @@ app.MapHub<ChatHub>("/hubs/chat");
 
 app.MapControllers();
 
+// ── WIRING DE EVENTOS ────────────────────────────────────────────────────
+// Suscribir RecordingCompleted de LiveTranscodeService al upload de YouTube.
+// LiveTranscodeService es Singleton, así que el evento persiste durante toda la app.
+{
+    var liveTranscode = app.Services.GetRequiredService<ILiveTranscodeService>();
+    var youtubeUpload = app.Services.GetRequiredService<IYouTubeUploadService>();
+
+    liveTranscode.RecordingCompleted += async (recording) =>
+    {
+        var logger = app.Services.GetRequiredService<ILogger<Program>>();
+        logger.LogInformation(
+            "Grabación completada para '{Channel}'. Iniciando subida a YouTube...",
+            recording.ChannelName);
+        await youtubeUpload.UploadAsync(recording);
+    };
+}
+
 app.Run();

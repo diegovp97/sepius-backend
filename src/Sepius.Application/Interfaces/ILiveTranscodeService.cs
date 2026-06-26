@@ -1,9 +1,10 @@
+using Sepius.Domain.Entities;
+
 namespace Sepius.Application.Interfaces;
 
 /// <summary>
-/// Gestiona el pipeline streamlink → ffmpeg → HLS.
-/// El backend produce los ficheros .m3u8/.ts que Angular reproduce
-/// con hls.js, sin ninguna sesión de Twitch del usuario.
+/// Gestiona el pipeline streamlink → ffmpeg → HLS + grabación MP4 integrada.
+/// Un solo proceso de streamlink por canal (ahorro de CPU y bandwidth).
 /// </summary>
 public interface ILiveTranscodeService
 {
@@ -17,4 +18,10 @@ public interface ILiveTranscodeService
 
     Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default);
     Task StopAsync(string channelName, string platform = "twitch");
+
+    /// <summary>
+    /// Se dispara cuando la grabación MP4 integrada termina (post-stream).
+    /// El handler puede subir el .mp4 a YouTube u otro destino.
+    /// </summary>
+    event Func<Recording, Task>? RecordingCompleted;
 }

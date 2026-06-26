@@ -56,21 +56,9 @@ public sealed class TwitchMonitorWorker : BackgroundService
             "TwitchMonitorWorker iniciado. Intervalo: {Interval}s",
             _options.PollingIntervalSeconds);
 
-        // Suscribirse al evento de grabación completada para subir a YouTube
-        using var scope = _scopeFactory.CreateAsyncScope();
-        var streamlink = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
-        var youtubeUpload = scope.ServiceProvider.GetRequiredService<IYouTubeUploadService>();
-
-        streamlink.RecordingCompleted += async (recording) =>
-        {
-            _logger.LogInformation(
-                "Grabación completada para '{Channel}'. Iniciando subida a YouTube...",
-                recording.ChannelName);
-            await youtubeUpload.UploadAsync(recording);
-        };
+        // RecordingCompleted ahora se gestiona en LiveTranscodeService (Pipeline unificado)
 
         // PeriodicTimer es la forma moderna (.NET 6+) de hacer polling periódico.
-        // Se cancela limpiamente cuando stoppingToken es cancelado.
         using var timer = new PeriodicTimer(
             TimeSpan.FromSeconds(_options.PollingIntervalSeconds));
 
@@ -102,7 +90,6 @@ public sealed class TwitchMonitorWorker : BackgroundService
     {
         using var scope = _scopeFactory.CreateAsyncScope();
         var channelRepo   = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
-        var streamlink    = scope.ServiceProvider.GetRequiredService<IStreamlinkService>();
         var liveTranscode = scope.ServiceProvider.GetRequiredService<ILiveTranscodeService>();
 
         var channels = await channelRepo.GetAllAsync(ct);
@@ -129,18 +116,15 @@ public sealed class TwitchMonitorWorker : BackgroundService
                 // null = estado desconocido (streamlink no pudo conectar) → no cambiar nada
                 var isLive = await IsKickChannelLiveAsync(slug, ct);
 
-                if (isLive == true && !streamlink.IsRecording(channel.Name))
+                if (isLive == true && !liveTranscode.IsTranscoding(slug, "kick"))
                 {
                     _logger.LogInformation("'{Channel}' está en DIRECTO (Kick). Iniciando HLS + grabación.", channel.Name);
-                    if (!liveTranscode.IsTranscoding(slug, "kick"))
-                        await liveTranscode.StartAsync(slug, "kick", ct);
-                    await streamlink.StartRecordingAsync(channel.Name, ct);
+                    await liveTranscode.StartAsync(slug, "kick", ct);
                 }
-                else if (isLive == false && streamlink.IsRecording(channel.Name))
+                else if (isLive == false && liveTranscode.IsTranscoding(slug, "kick"))
                 {
-                    _logger.LogInformation("'{Channel}' ha terminado el directo (Kick). Deteniendo HLS + grabación.", channel.Name);
+                    _logger.LogInformation("'{Channel}' ha terminado el directo (Kick). Deteniendo HLS.", channel.Name);
                     await liveTranscode.StopAsync(slug, "kick");
-                    await streamlink.StopRecordingAsync(channel.Name);
                 }
                 else if (isLive == null)
                 {
