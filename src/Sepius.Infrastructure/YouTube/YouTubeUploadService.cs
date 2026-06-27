@@ -50,10 +50,20 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
                 recording.FileName,
                 recording.FileSizeBytes / 1_048_576.0);
 
-            var credential = GoogleCredential.FromRefreshToken(
-                _options.RefreshToken,
-                YouTubeService.Scope.YoutubeUpload)
-                .CreateWithUserAgent("Sepius");
+            var flow = new GoogleAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
+            {
+                ClientSecrets = new ClientSecrets
+                {
+                    ClientId = _options.ClientId,
+                    ClientSecret = _options.ClientSecret
+                },
+                Scopes = [YouTubeService.Scope.YoutubeUpload]
+            });
+
+            var credential = new UserCredential(flow, "user", new Google.Apis.Auth.OAuth2.Responses.TokenResponse
+            {
+                RefreshToken = _options.RefreshToken
+            });
 
             var youtubeService = new YouTubeService(new BaseClientService.Initializer
             {
