@@ -152,12 +152,16 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-max_muxing_queue_size 1024",
             $"\"{mp4Path}\"");
 
-        var bashCmd = $"trap 'kill -INT 0' INT TERM; {slCmd} | \"{_options.FfmpegPath}\" {ffArgs} 2>&1; wait";
+        var scriptPath = $"/tmp/sepius_transcode_{sessionId}.sh";
+        var scriptContent = string.Join("\n",
+            "#!/bin/bash",
+            $"{slCmd} | \"{_options.FfmpegPath}\" {ffArgs} 2>&1");
+        await File.WriteAllTextAsync(scriptPath, scriptContent, ct).ConfigureAwait(false);
 
         var psi = new ProcessStartInfo
         {
             FileName               = "/bin/bash",
-            Arguments              = $"-c \"{bashCmd}\"",
+            Arguments              = scriptPath,
             UseShellExecute        = false,
             RedirectStandardError  = true,
             CreateNoWindow         = true
@@ -347,7 +351,25 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         {
             if (!process.HasExited)
             {
-                // SIGINT al proceso bash → trap lo reenvía a streamlink+ffmpeg vía kill -INT 0
+                // 1) SIGINT a todos los hijos directos (ffmpeg, streamlink)
+                //    para que ffmpeg finalice y escriba el moov atom.
+                try
+                {
+                    var pkillPsi = new System.Diagnostics.ProcessStartInfo
+                    {
+                        FileName = "pkill",
+                        Arguments = $"-INT -P {process.Id}",
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+                    var pkillProc = System.Diagnostics.Process.Start(pkillPsi);
+                    pkillProc?.WaitForExit(3_000);
+                }
+                catch { }
+
+                // 2) SIGINT al proceso bash
                 try
                 {
                     var killPsi = new System.Diagnostics.ProcessStartInfo
