@@ -76,7 +76,7 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
             initRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
             initRequest.Headers.Add("X-Upload-Content-Length", fileStream.Length.ToString());
             initRequest.Headers.Add("X-Upload-Content-Type", "video/*");
-            initRequest.Content = new StringContent(metadata, Encoding.UTF8, "application/json; charset=UTF-8");
+            initRequest.Content = new StringContent(metadata, Encoding.UTF8, "application/json");
 
             var initResponse = await _http.SendAsync(initRequest, ct);
             if (!initResponse.IsSuccessStatusCode)
