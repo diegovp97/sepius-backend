@@ -1,8 +1,6 @@
-using Google.Apis.Auth.OAuth2;
-using Google.Apis.Services;
-using Google.Apis.Upload;
-using Google.Apis.YouTube.v3;
-using Google.Apis.YouTube.v3.Data;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Sepius.Application.Interfaces;
@@ -14,13 +12,19 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
 {
     private readonly YouTubeOptions _options;
     private readonly ILogger<YouTubeUploadService> _logger;
+    private readonly HttpClient _http;
+
+    private const string TokenUrl = "https://oauth2.googleapis.com/token";
+    private const string UploadUrl = "https://www.googleapis.com/upload/youtube/v3/videos";
 
     public YouTubeUploadService(
         IOptions<YouTubeOptions> options,
-        ILogger<YouTubeUploadService> logger)
+        ILogger<YouTubeUploadService> logger,
+        HttpClient http)
     {
         _options = options.Value;
         _logger = logger;
+        _http = http;
     }
 
     public async Task<string?> UploadAsync(Recording recording, CancellationToken ct = default)
@@ -50,28 +54,15 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
                 recording.FileName,
                 recording.FileSizeBytes / 1_048_576.0);
 
-            var flow = new GoogleAuthorizationCodeFlow(new GoogleAuthorizationCodeFlow.Initializer
+            var accessToken = await GetAccessTokenAsync(ct);
+            if (accessToken is null)
             {
-                ClientSecrets = new ClientSecrets
-                {
-                    ClientId = _options.ClientId,
-                    ClientSecret = _options.ClientSecret
-                },
-                Scopes = [YouTubeService.Scope.YoutubeUpload]
-            });
+                _logger.LogError("Failed to obtain YouTube access token.");
+                return null;
+            }
 
-            var credential = new UserCredential(flow, "user", new Google.Apis.Auth.OAuth2.Responses.TokenResponse
-            {
-                RefreshToken = _options.RefreshToken
-            });
+            var metadata = BuildMetadataJson(recording);
 
-            var youtubeService = new YouTubeService(new BaseClientService.Initializer
-            {
-                HttpClientInitializer = credential,
-                ApplicationName = "Sepius"
-            });
-
-            var video = BuildVideoMetadata(recording);
             using var fileStream = new FileStream(
                 recording.FilePath,
                 FileMode.Open,
@@ -80,29 +71,86 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
                 bufferSize: 262_144,
                 useAsync: true);
 
-            var insertRequest = youtubeService.Videos.Insert(
-                video,
-                "snippet,status",
-                fileStream,
-                "video/*");
+            var initRequest = new HttpRequestMessage(HttpMethod.Post,
+                $"{UploadUrl}?uploadType=resumable&part=snippet,status");
+            initRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+            initRequest.Content = new StringContent(metadata, Encoding.UTF8, "application/json; charset=UTF-8");
+            initRequest.Content.Headers.Add("X-Upload-Content-Length", fileStream.Length.ToString());
+            initRequest.Content.Headers.Add("X-Upload-Content-Type", "video/*");
 
-            insertRequest.ChunkSize = ResumableUpload.MinimumChunkSize * 4;
-            insertRequest.ProgressChanged += progress => LogProgress(progress, recording.FileName);
-            insertRequest.ResponseReceived += response =>
-                _logger.LogInformation(
-                    "YouTube upload OK: '{File}' → https://youtu.be/{VideoId}",
-                    recording.FileName, response.Id);
-
-            var result = await insertRequest.UploadAsync(ct);
-
-            if (result.Status == UploadStatus.Failed)
+            var initResponse = await _http.SendAsync(initRequest, ct);
+            if (!initResponse.IsSuccessStatusCode)
             {
-                _logger.LogError(result.Exception,
-                    "YouTube upload failed for '{File}'.", recording.FileName);
+                var error = await initResponse.Content.ReadAsStringAsync(ct);
+                _logger.LogError("YouTube resumable init failed ({Status}): {Error}", initResponse.StatusCode, error);
                 return null;
             }
 
-            return insertRequest.ResponseBody?.Id;
+            var uploadUri = initResponse.Headers.Location?.ToString();
+            if (string.IsNullOrEmpty(uploadUri))
+            {
+                _logger.LogError("No upload URI returned from YouTube.");
+                return null;
+            }
+
+            _logger.LogInformation("YouTube resumable upload started for '{File}'.", recording.FileName);
+
+            var chunkSize = 10 * 1024 * 1024;
+            var buffer = new byte[chunkSize];
+            long offset = 0;
+
+            while (offset < fileStream.Length)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var bytesRead = await fileStream.ReadAsync(buffer, 0, chunkSize, ct);
+                if (bytesRead == 0) break;
+
+                var lastByte = offset + bytesRead - 1;
+                var contentRange = $"bytes {offset}-{lastByte}/{fileStream.Length}";
+
+                using var chunkContent = new ByteArrayContent(buffer, 0, bytesRead);
+                chunkContent.Headers.ContentType = new MediaTypeHeaderValue("video/*");
+                chunkContent.Headers.ContentRange = new ContentRangeHeaderValue(offset, lastByte, fileStream.Length);
+
+                var chunkRequest = new HttpRequestMessage(HttpMethod.Put, uploadUri);
+                chunkRequest.Content = chunkContent;
+                chunkRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                var chunkResponse = await _http.SendAsync(chunkRequest, ct);
+
+                var sentMB = (offset + bytesRead) / 1_048_576.0;
+                var totalMB = fileStream.Length / 1_048_576.0;
+                _logger.LogDebug("YouTube uploading '{File}': {Sent:F1}/{Total:F1} MB",
+                    recording.FileName, sentMB, totalMB);
+
+                if (chunkResponse.StatusCode == System.Net.HttpStatusCode.OK ||
+                    chunkResponse.StatusCode == System.Net.HttpStatusCode.Created)
+                {
+                    var responseText = await chunkResponse.Content.ReadAsStringAsync(ct);
+                    var responseDoc = JsonDocument.Parse(responseText);
+                    var videoId = responseDoc.RootElement.GetProperty("id").GetString();
+
+                    _logger.LogInformation(
+                        "YouTube upload OK: '{File}' → https://youtu.be/{VideoId}",
+                        recording.FileName, videoId);
+
+                    return videoId;
+                }
+
+                if (chunkResponse.StatusCode != System.Net.HttpStatusCode.ResumeIncomplete)
+                {
+                    var error = await chunkResponse.Content.ReadAsStringAsync(ct);
+                    _logger.LogError("YouTube upload chunk failed ({Status}): {Error}",
+                        chunkResponse.StatusCode, error);
+                    return null;
+                }
+
+                offset += bytesRead;
+            }
+
+            _logger.LogError("YouTube upload completed without response for '{File}'.", recording.FileName);
+            return null;
         }
         catch (OperationCanceledException)
         {
@@ -116,43 +164,57 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
         }
     }
 
-    private Video BuildVideoMetadata(Recording recording)
+    private async Task<string?> GetAccessTokenAsync(CancellationToken ct)
+    {
+        var form = new Dictionary<string, string>
+        {
+            ["client_id"] = _options.ClientId,
+            ["client_secret"] = _options.ClientSecret,
+            ["refresh_token"] = _options.RefreshToken,
+            ["grant_type"] = "refresh_token"
+        };
+
+        var response = await _http.PostAsync(TokenUrl, new FormUrlEncodedContent(form), ct);
+        if (!response.IsSuccessStatusCode)
+        {
+            var error = await response.Content.ReadAsStringAsync(ct);
+            _logger.LogError("YouTube token refresh failed ({Status}): {Error}", response.StatusCode, error);
+            return null;
+        }
+
+        var json = await response.Content.ReadAsStringAsync(ct);
+        var doc = JsonDocument.Parse(json);
+        return doc.RootElement.GetProperty("access_token").GetString();
+    }
+
+    private string BuildMetadataJson(Recording recording)
     {
         var startedAt = recording.StartedAt.ToLocalTime();
         var title = $"{recording.ChannelName} - {startedAt:yyyy-MM-dd HH:mm}";
+        if (title.Length > 100) title = title[..100];
+
         var description =
             $"Stream de {recording.ChannelName} grabado el {startedAt:dd/MM/yyyy} a las {startedAt:HH:mm}.\n" +
             $"Grabado automáticamente por Sepius.";
 
-        return new Video
+        var metadata = new
         {
-            Snippet = new VideoSnippet
+            snippet = new
             {
-                Title = title.Length > 100 ? title[..100] : title,
-                Description = description,
-                Tags = [recording.ChannelName, "stream", "twitch", "grabacion"],
-                CategoryId = "20" // Gaming
+                title,
+                description,
+                tags = new[] { recording.ChannelName, "stream", "twitch", "grabacion" },
+                categoryId = "20"
             },
-            Status = new VideoStatus
+            status = new
             {
-                PrivacyStatus = _options.PrivacyStatus
+                privacyStatus = _options.PrivacyStatus
             }
         };
-    }
 
-    private void LogProgress(IUploadProgress progress, string fileName)
-    {
-        switch (progress.Status)
+        return JsonSerializer.Serialize(metadata, new JsonSerializerOptions
         {
-            case UploadStatus.Uploading:
-                _logger.LogDebug(
-                    "YouTube uploading '{File}': {MB:F1} MB sent",
-                    fileName, progress.BytesSent / 1_048_576.0);
-                break;
-            case UploadStatus.Failed:
-                _logger.LogError(progress.Exception,
-                    "Upload failed for '{File}'.", fileName);
-                break;
-        }
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
     }
 }

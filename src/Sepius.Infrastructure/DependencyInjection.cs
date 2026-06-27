@@ -70,7 +70,7 @@ public static class DependencyInjection
 
         // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
         services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
-        services.AddSingleton<IYouTubeUploadService, YouTubeUploadService>();
+        services.AddHttpClient<IYouTubeUploadService, YouTubeUploadService>();
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
