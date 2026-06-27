@@ -10,20 +10,6 @@ using Sepius.Domain.Entities;
 
 namespace Sepius.Infrastructure.YouTube;
 
-/// <summary>
-/// Sube grabaciones completadas a YouTube usando la Data API v3.
-///
-/// AUTENTICACIÓN:
-/// Usa OAuth2 con flujo "installed application". La primera vez que se ejecute,
-/// abrirá el navegador para que el usuario autorice la app. El token se guarda
-/// en disco (TokenStorePath) y se renueva automáticamente.
-///
-/// PREREQUISITOS:
-/// 1. Crear un proyecto en Google Cloud Console.
-/// 2. Habilitar "YouTube Data API v3".
-/// 3. Crear credenciales OAuth2 de tipo "Aplicación de escritorio".
-/// 4. Descargar client_secrets.json y poner la ruta en appsettings.json.
-/// </summary>
 public sealed class YouTubeUploadService : IYouTubeUploadService
 {
     private readonly YouTubeOptions _options;
@@ -41,34 +27,34 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
     {
         if (!_options.Enabled)
         {
-            _logger.LogDebug("Subida a YouTube deshabilitada (YouTube:Enabled = false).");
+            _logger.LogDebug("YouTube upload disabled.");
             return null;
         }
 
         if (!File.Exists(recording.FilePath))
         {
-            _logger.LogWarning(
-                "No se puede subir '{File}': el archivo no existe.", recording.FilePath);
+            _logger.LogWarning("Cannot upload '{File}': file not found.", recording.FilePath);
             return null;
         }
 
-        if (!File.Exists(_options.ClientSecretsPath))
+        if (string.IsNullOrWhiteSpace(_options.RefreshToken))
         {
-            _logger.LogError(
-                "No se encontró client_secrets.json en '{Path}'. " +
-                "Descárgalo desde Google Cloud Console y configura YouTube:ClientSecretsPath.",
-                _options.ClientSecretsPath);
+            _logger.LogError("YouTube:RefreshToken not configured.");
             return null;
         }
 
         try
         {
             _logger.LogInformation(
-                "Iniciando subida a YouTube: '{File}' ({SizeMB:F1} MB)",
+                "Starting YouTube upload: '{File}' ({SizeMB:F1} MB)",
                 recording.FileName,
                 recording.FileSizeBytes / 1_048_576.0);
 
-            var credential = await AuthorizeAsync(ct);
+            var credential = GoogleCredential.FromRefreshToken(
+                _options.RefreshToken,
+                YouTubeService.Scope.YoutubeUpload)
+                .CreateWithUserAgent("Sepius");
+
             var youtubeService = new YouTubeService(new BaseClientService.Initializer
             {
                 HttpClientInitializer = credential,
@@ -90,19 +76,19 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
                 fileStream,
                 "video/*");
 
-            insertRequest.ChunkSize = ResumableUpload.MinimumChunkSize * 4; // 1 MB chunks
+            insertRequest.ChunkSize = ResumableUpload.MinimumChunkSize * 4;
             insertRequest.ProgressChanged += progress => LogProgress(progress, recording.FileName);
             insertRequest.ResponseReceived += response =>
                 _logger.LogInformation(
-                    "Video '{File}' subido correctamente. ID: {VideoId} | URL: https://youtu.be/{VideoId}",
-                    recording.FileName, response.Id, response.Id);
+                    "YouTube upload OK: '{File}' → https://youtu.be/{VideoId}",
+                    recording.FileName, response.Id);
 
             var result = await insertRequest.UploadAsync(ct);
 
             if (result.Status == UploadStatus.Failed)
             {
                 _logger.LogError(result.Exception,
-                    "Error al subir '{File}' a YouTube.", recording.FileName);
+                    "YouTube upload failed for '{File}'.", recording.FileName);
                 return null;
             }
 
@@ -110,25 +96,14 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
         }
         catch (OperationCanceledException)
         {
-            _logger.LogWarning("Subida a YouTube cancelada para '{File}'.", recording.FileName);
+            _logger.LogWarning("YouTube upload cancelled for '{File}'.", recording.FileName);
             return null;
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error inesperado al subir '{File}' a YouTube.", recording.FileName);
+            _logger.LogError(ex, "Unexpected error uploading '{File}' to YouTube.", recording.FileName);
             return null;
         }
-    }
-
-    private async Task<UserCredential> AuthorizeAsync(CancellationToken ct)
-    {
-        await using var secretsStream = File.OpenRead(_options.ClientSecretsPath);
-        return await GoogleWebAuthorizationBroker.AuthorizeAsync(
-            GoogleClientSecrets.FromStream(secretsStream).Secrets,
-            [YouTubeService.Scope.YoutubeUpload],
-            "user",
-            ct,
-            new Google.Apis.Util.Store.FileDataStore(_options.TokenStorePath, fullPath: false));
     }
 
     private Video BuildVideoMetadata(Recording recording)
@@ -145,7 +120,7 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
             {
                 Title = title.Length > 100 ? title[..100] : title,
                 Description = description,
-                Tags = [recording.ChannelName, "stream", "twitch", "grabación"],
+                Tags = [recording.ChannelName, "stream", "twitch", "grabacion"],
                 CategoryId = "20" // Gaming
             },
             Status = new VideoStatus
@@ -161,12 +136,12 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
         {
             case UploadStatus.Uploading:
                 _logger.LogDebug(
-                    "Subiendo '{File}': {MB:F1} MB enviados",
+                    "YouTube uploading '{File}': {MB:F1} MB sent",
                     fileName, progress.BytesSent / 1_048_576.0);
                 break;
             case UploadStatus.Failed:
                 _logger.LogError(progress.Exception,
-                    "Fallo durante la subida de '{File}'.", fileName);
+                    "Upload failed for '{File}'.", fileName);
                 break;
         }
     }

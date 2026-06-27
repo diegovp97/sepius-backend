@@ -42,6 +42,11 @@ services:
       - Monitor__Channels__0=elttblue
       - Monitor__Channels__1=kick:elttblue
       - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
+      - YouTube__Enabled=${YOUTUBE_ENABLED:-false}
+      - YouTube__ClientId=${YOUTUBE_CLIENT_ID:-}
+      - YouTube__ClientSecret=${YOUTUBE_CLIENT_SECRET:-}
+      - YouTube__RefreshToken=${YOUTUBE_REFRESH_TOKEN:-}
+      - YouTube__PrivacyStatus=${YOUTUBE_PRIVACY_STATUS:-unlisted}
       - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
     volumes:
       - recordings_data:/recordings
