@@ -138,7 +138,7 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
                     return videoId;
                 }
 
-                if (chunkResponse.StatusCode != System.Net.HttpStatusCode.ResumeIncomplete)
+                if ((int)chunkResponse.StatusCode != 308)
                 {
                     var error = await chunkResponse.Content.ReadAsStringAsync(ct);
                     _logger.LogError("YouTube upload chunk failed ({Status}): {Error}",
