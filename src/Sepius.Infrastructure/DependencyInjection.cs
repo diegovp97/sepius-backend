@@ -72,6 +72,10 @@ public static class DependencyInjection
         services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
         services.AddHttpClient<IYouTubeUploadService, YouTubeUploadService>();
 
+        // Cola de subidas a YouTube — BackgroundService que procesa encolados
+        services.AddSingleton<YouTubeUploadQueue>();
+        services.AddHostedService(sp => sp.GetRequiredService<YouTubeUploadQueue>());
+
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
         // Render provee la URL en formato postgresql://user:pass@host/db

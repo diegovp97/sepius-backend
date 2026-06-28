@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Sepius.Application.DTOs;
 using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
+using Sepius.Infrastructure.YouTube;
 
 namespace Sepius.API.Controllers;
 
@@ -14,16 +15,16 @@ namespace Sepius.API.Controllers;
 public sealed class RecordingsController : ControllerBase
 {
     private readonly IStreamlinkService _streamlink;
-    private readonly IYouTubeUploadService _youtubeUpload;
+    private readonly YouTubeUploadQueue _uploadQueue;
     private readonly ILogger<RecordingsController> _logger;
 
     public RecordingsController(
         IStreamlinkService streamlink,
-        IYouTubeUploadService youtubeUpload,
+        YouTubeUploadQueue uploadQueue,
         ILogger<RecordingsController> logger)
     {
         _streamlink = streamlink;
-        _youtubeUpload = youtubeUpload;
+        _uploadQueue = uploadQueue;
         _logger = logger;
     }
 
@@ -62,11 +63,11 @@ public sealed class RecordingsController : ControllerBase
         r.FileSizeBytes
     );
 
-    /// <summary>Sube una grabación existente a YouTube por su ruta de archivo.</summary>
+    /// <summary>Sube una grabación existente a YouTube por su ruta de archivo (fire-and-forget).</summary>
     [HttpPost("upload")]
-    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(object), StatusCodes.Status202Accepted)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Upload([FromQuery] string filePath, [FromQuery] string channelName = "elttblue")
+    public IActionResult Upload([FromQuery] string filePath, [FromQuery] string channelName = "elttblue")
     {
         if (!System.IO.File.Exists(filePath))
             return NotFound($"Archivo no encontrado: {filePath}");
@@ -77,13 +78,56 @@ public sealed class RecordingsController : ControllerBase
         recording.EndedAt = fileInfo.LastWriteTimeUtc;
         recording.FileSizeBytes = fileInfo.Length;
 
-        _logger.LogInformation("Upload manual solicitado para '{File}'", filePath);
-        var videoId = await _youtubeUpload.UploadAsync(recording);
+        _logger.LogInformation("Upload encolado para '{File}'", filePath);
+        var job = _uploadQueue.Enqueue(recording);
 
-        if (videoId is null)
-            return StatusCode(500, "Error al subir a YouTube. Revisa los logs.");
+        return Accepted(new
+        {
+            jobId = job.Id,
+            message = "Subida encolada. Consulta /api/recordings/upload/status/{jobId} para el progreso."
+        });
+    }
 
-        return Ok(new { videoId, url = $"https://youtu.be/{videoId}" });
+    /// <summary>Devuelve el estado de una subida encolada.</summary>
+    [HttpGet("upload/status/{jobId}")]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult UploadStatus(string jobId)
+    {
+        var job = _uploadQueue.GetJob(jobId);
+        if (job is null)
+            return NotFound($"Job no encontrado: {jobId}");
+
+        return Ok(new
+        {
+            job.Id,
+            status = job.Status.ToString(),
+            fileName = job.Recording.FileName,
+            videoId = job.VideoId,
+            error = job.Error,
+            queuedAt = job.QueuedAt,
+            startedAt = job.StartedAt,
+            completedAt = job.CompletedAt
+        });
+    }
+
+    /// <summary>Devuelve todos los jobs de subida (activos y recientes).</summary>
+    [HttpGet("upload/status")]
+    [ProducesResponseType(typeof(IEnumerable<object>), StatusCodes.Status200OK)]
+    public IActionResult UploadStatusAll()
+    {
+        var jobs = _uploadQueue.GetAllJobs().Select(j => new
+        {
+            j.Id,
+            status = j.Status.ToString(),
+            fileName = j.Recording.FileName,
+            videoId = j.VideoId,
+            error = j.Error,
+            queuedAt = j.QueuedAt,
+            startedAt = j.StartedAt,
+            completedAt = j.CompletedAt
+        });
+        return Ok(jobs);
     }
 
     /// <summary>Lista las grabaciones MP4 en el directorio de recordings.</summary>

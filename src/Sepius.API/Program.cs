@@ -7,6 +7,7 @@ using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
 using Sepius.Infrastructure;
 using Sepius.Infrastructure.Persistence;
+using Sepius.Infrastructure.YouTube;
 // ══════════════════════════════════════════════════════════════════════════════
 // PROGRAM.CS — El punto de entrada de la app y configuración del contenedor DI
 //
@@ -119,19 +120,19 @@ app.MapHub<ChatHub>("/hubs/chat");
 app.MapControllers();
 
 // ── WIRING DE EVENTOS ────────────────────────────────────────────────────
-// Suscribir RecordingCompleted de LiveTranscodeService al upload de YouTube.
-// LiveTranscodeService es Singleton, así que el evento persiste durante toda la app.
+// Suscribir RecordingCompleted de LiveTranscodeService a la cola de YouTube.
+// El upload automático pasa por la cola para evitar subidas concurrentes.
 {
     var liveTranscode = app.Services.GetRequiredService<ILiveTranscodeService>();
-    var youtubeUpload = app.Services.GetRequiredService<IYouTubeUploadService>();
+    var uploadQueue = app.Services.GetRequiredService<YouTubeUploadQueue>();
 
-    liveTranscode.RecordingCompleted += async (recording) =>
+    liveTranscode.RecordingCompleted += (recording) =>
     {
         var logger = app.Services.GetRequiredService<ILogger<Program>>();
         logger.LogInformation(
-            "Grabación completada para '{Channel}'. Iniciando subida a YouTube...",
+            "Grabación completada para '{Channel}'. Encolando subida a YouTube...",
             recording.ChannelName);
-        await youtubeUpload.UploadAsync(recording);
+        uploadQueue.Enqueue(recording);
     };
 }
 
