@@ -133,6 +133,7 @@ app.MapControllers();
             "Grabación completada para '{Channel}'. Encolando subida a YouTube...",
             recording.ChannelName);
         uploadQueue.Enqueue(recording);
+        return Task.CompletedTask;
     };
 }
 
