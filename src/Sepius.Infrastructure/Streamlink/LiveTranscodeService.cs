@@ -148,7 +148,6 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             $"-hls_segment_filename \"{segPattern}\"",
             $"\"{m3u8Path}\"",
             "-c copy",
-            "-movflags +faststart",
             "-max_muxing_queue_size 1024",
             $"\"{mp4Path}\"");
 
@@ -291,14 +290,21 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             var fileInfo = new FileInfo(mp4Path);
             if (fileInfo.Length > 0)
             {
+                // Aplicar faststart como post-proceso para que el moov atom quede al inicio
+                var repaired = await ApplyFaststartAsync(mp4Path).ConfigureAwait(false);
+                if (repaired)
+                    _logger.LogInformation(
+                        "[Transcode] Faststart aplicado a: {Path}", mp4Path);
+
+                var finalInfo = new FileInfo(mp4Path);
                 _logger.LogInformation(
                     "[Transcode] Grabación MP4 completada: {Path} ({Size:N0} bytes)",
-                    mp4Path, fileInfo.Length);
+                    mp4Path, finalInfo.Length);
 
                 var recording = Recording.Create($"twitch:{channelName}", mp4Path);
                 recording.EndedAt = DateTime.UtcNow;
                 recording.Status = RecordingStatus.Completed;
-                recording.FileSizeBytes = fileInfo.Length;
+                recording.FileSizeBytes = finalInfo.Length;
 
                 FireRecordingCompleted(recording);
             }
@@ -313,6 +319,46 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    private async Task<bool> ApplyFaststartAsync(string mp4Path)
+    {
+        var tempPath = mp4Path + ".faststart.mp4";
+        try
+        {
+            var psi = new ProcessStartInfo
+            {
+                FileName = _options.FfmpegPath,
+                Arguments = $"-y -i \"{mp4Path}\" -c copy -movflags +faststart \"{tempPath}\"",
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using var proc = new Process { StartInfo = psi };
+            proc.Start();
+            await proc.WaitForExitAsync().ConfigureAwait(false);
+
+            if (proc.ExitCode == 0 && File.Exists(tempPath))
+            {
+                var tempInfo = new FileInfo(tempPath);
+                if (tempInfo.Length > 0)
+                {
+                    File.Delete(mp4Path);
+                    File.Move(tempPath, mp4Path);
+                    return true;
+                }
+            }
+
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error aplicando faststart a '{Path}'", mp4Path);
+            if (File.Exists(tempPath)) File.Delete(tempPath);
+            return false;
+        }
+    }
 
     private string GetHlsDirectory(string platform, string channelName)
         => Path.Combine(_options.OutputPath, "live", platform, channelName);
@@ -386,12 +432,15 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                 }
                 catch { }
 
-                process.WaitForExit(10_000);
+                process.WaitForExit(120_000);
 
                 if (!process.HasExited)
                 {
+                    _logger.LogWarning(
+                        "[KillSafely] Proceso '{Label}' no terminó tras 120s. Forzando kill.",
+                        label);
                     process.Kill(entireProcessTree: true);
-                    process.WaitForExit(5_000);
+                    process.WaitForExit(10_000);
                 }
             }
         }
