@@ -166,7 +166,117 @@ public sealed class RecordingsController : ControllerBase
         if (!System.IO.File.Exists(filePath))
             return NotFound($"Archivo no encontrado: {filePath}");
 
+        Response.Headers["Accept-Ranges"] = "bytes";
+        Response.Headers["X-Accel-Buffering"] = "no";
+
+        var fileInfo = new FileInfo(filePath);
+        var totalLength = fileInfo.Length;
+
+        if (!Request.Headers.ContainsKey("Range"))
+        {
+            Response.ContentLength = totalLength;
+            Response.ContentType = "video/mp4";
+            return File(new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read), "video/mp4");
+        }
+
+        var rangeHeader = Request.Headers.Range.ToString();
+        var match = System.Text.RegularExpressions.Regex.Match(rangeHeader, @"bytes=(\d+)-(\d*)");
+        if (!match.Success)
+        {
+            Response.ContentLength = totalLength;
+            Response.ContentType = "video/mp4";
+            return File(new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read), "video/mp4");
+        }
+
+        var start = long.Parse(match.Groups[1].Value);
+        var end = match.Groups[2].Success && !string.IsNullOrEmpty(match.Groups[2].Value)
+            ? long.Parse(match.Groups[2].Value)
+            : totalLength - 1;
+
+        if (start >= totalLength || start > end)
+        {
+            Response.StatusCode = StatusCodes.Status416RangeNotSatisfiable;
+            Response.Headers.ContentRange = $"bytes */{totalLength}";
+            return new EmptyResult();
+        }
+
+        if (end >= totalLength)
+            end = totalLength - 1;
+
+        var chunkSize = end - start + 1;
+
+        Response.StatusCode = StatusCodes.Status206PartialContent;
+        Response.ContentType = "video/mp4";
+        Response.ContentLength = chunkSize;
+        Response.Headers.ContentRange = $"bytes {start}-{end}/{totalLength}";
+
         var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
-        return File(stream, "video/mp4", enableRangeProcessing: true);
+        stream.Seek(start, SeekOrigin.Begin);
+
+        var boundedStream = new BoundedStream(stream, chunkSize);
+        return new FileStreamResult(boundedStream, "video/mp4");
+    }
+
+    /// <summary>Stream wrapper that limits reads to a maximum number of bytes.</summary>
+    private sealed class BoundedStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly long _maxBytes;
+        private long _read;
+
+        public BoundedStream(Stream inner, long maxBytes)
+        {
+            _inner = inner;
+            _maxBytes = maxBytes;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_read >= _maxBytes) return 0;
+            var remaining = (int)Math.Min(count, _maxBytes - _read);
+            var n = _inner.Read(buffer, offset, remaining);
+            _read += n;
+            return n;
+        }
+
+        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            if (_read >= _maxBytes) return Task.FromResult(0);
+            var remaining = (int)Math.Min(count, _maxBytes - _read);
+            return _inner.ReadAsync(buffer, offset, remaining, ct).ContinueWith(t =>
+            {
+                _read += t.Result;
+                return t.Result;
+            }, ct);
+        }
+
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            if (_read >= _maxBytes) return ValueTask.FromResult(0);
+            var remaining = (int)Math.Min(buffer.Length, _maxBytes - _read);
+            var limited = buffer.Slice(0, remaining);
+            return _inner.ReadAsync(limited, ct).ContinueWith(t =>
+            {
+                _read += t.Result;
+                return t.Result;
+            }, ct);
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
     }
 }
