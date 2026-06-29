@@ -133,9 +133,10 @@ public sealed class RecordingsController : ControllerBase
     /// <summary>Lista las grabaciones MP4 en el directorio de recordings.</summary>
     [HttpGet("list")]
     [ProducesResponseType(typeof(IEnumerable<object>), StatusCodes.Status200OK)]
-    public IActionResult List([FromQuery] string channelName = "elttblue")
+    public IActionResult List([FromQuery] string channelName = "elttblue", [FromQuery] string platform = "twitch")
     {
-        var recordingsPath = $"/recordings/twitch/{channelName}";
+        var normalizedPlatform = platform.ToLowerInvariant().Trim() is "kick" ? "kick" : "twitch";
+        var recordingsPath = $"/recordings/{normalizedPlatform}/{channelName}";
         if (!Directory.Exists(recordingsPath))
             return NotFound($"Directorio no encontrado: {recordingsPath}");
 
