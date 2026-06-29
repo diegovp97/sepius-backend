@@ -152,4 +152,66 @@ public sealed class RecordingsController : ControllerBase
 
         return Ok(files);
     }
+
+    /// <summary> sirve un archivo MP4 para streaming/preview con soporte de range requests.</summary>
+    [HttpGet("stream")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status206PartialContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult Stream([FromQuery] string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            return BadRequest("filePath es obligatorio.");
+
+        if (!System.IO.File.Exists(filePath))
+            return NotFound($"Archivo no encontrado: {filePath}");
+
+        var fileInfo = new FileInfo(filePath);
+        var fileSize = fileInfo.Length;
+        var contentType = "video/mp4";
+
+        // Soporte para range requests (necesario para seek en el reproductor)
+        if (Request.Headers.Range.Count > 0)
+        {
+            var range = Request.Headers.Range.ToString();
+            var rangeMatch = System.Text.RegularExpressions.Regex.Match(range, @"bytes=(\d+)-(\d*)");
+
+            if (rangeMatch.Success)
+            {
+                var start = long.Parse(rangeMatch.Groups[1].Value);
+                var end = rangeMatch.Success && rangeMatch.Groups[2].Value.Length > 0
+                    ? long.Parse(rangeMatch.Groups[2].Value)
+                    : fileSize - 1;
+
+                if (start >= fileSize || end >= fileSize || start > end)
+                {
+                    Response.StatusCode = StatusCodes.Status416RangeNotSatisfiable;
+                    Response.Headers.ContentRange = $"bytes */{fileSize}";
+                    return new EmptyResult();
+                }
+
+                var length = end - start + 1;
+                Response.StatusCode = StatusCodes.Status206PartialContent;
+                Response.Headers.ContentRange = $"bytes {start}-{end}/{fileSize}";
+                Response.ContentLength = length;
+                Response.ContentType = contentType;
+
+                var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return new FileStreamResult(stream, contentType)
+                {
+                    EnableRangeProcessing = true
+                };
+            }
+        }
+
+        // Sin range: devolver todo el archivo
+        Response.ContentLength = fileSize;
+        Response.ContentType = contentType;
+
+        var fullStream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.Read);
+        return new FileStreamResult(fullStream, contentType)
+        {
+            EnableRangeProcessing = true
+        };
+    }
 }
