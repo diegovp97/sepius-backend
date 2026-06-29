@@ -225,3 +225,61 @@ public sealed class RecordingsController : ControllerBase
     }
 
     /// <summary>Stream wrapper that limits reads to a maximum number of bytes.</summary>
+    private sealed class BoundedStream : Stream
+    {
+        private readonly Stream _inner;
+        private readonly long _maxBytes;
+        private long _read;
+
+        public BoundedStream(Stream inner, long maxBytes)
+        {
+            _inner = inner;
+            _maxBytes = maxBytes;
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => _inner.Length;
+        public override long Position { get => _inner.Position; set => throw new NotSupportedException(); }
+
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            if (_read >= _maxBytes) return 0;
+            var remaining = (int)Math.Min(count, _maxBytes - _read);
+            var n = _inner.Read(buffer, offset, remaining);
+            _read += n;
+            return n;
+        }
+
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        {
+            if (_read >= _maxBytes) return 0;
+            var remaining = (int)Math.Min(count, _maxBytes - _read);
+            var n = await _inner.ReadAsync(buffer, offset, remaining, ct).ConfigureAwait(false);
+            _read += n;
+            return n;
+        }
+
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        {
+            if (_read >= _maxBytes) return 0;
+            var remaining = (int)Math.Min(buffer.Length, _maxBytes - _read);
+            var limited = buffer.Slice(0, remaining);
+            var n = await _inner.ReadAsync(limited, ct).ConfigureAwait(false);
+            _read += n;
+            return n;
+        }
+
+        public override void Flush() { }
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) _inner.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+}
