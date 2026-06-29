@@ -245,27 +245,23 @@ public sealed class RecordingsController : ControllerBase
             return n;
         }
 
-        public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
+        public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken ct)
         {
-            if (_read >= _maxBytes) return Task.FromResult(0);
+            if (_read >= _maxBytes) return 0;
             var remaining = (int)Math.Min(count, _maxBytes - _read);
-            return _inner.ReadAsync(buffer, offset, remaining, ct).ContinueWith(t =>
-            {
-                _read += t.Result;
-                return t.Result;
-            }, ct);
+            var n = await _inner.ReadAsync(buffer, offset, remaining, ct).ConfigureAwait(false);
+            _read += n;
+            return n;
         }
 
-        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
+        public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken ct = default)
         {
-            if (_read >= _maxBytes) return ValueTask.FromResult(0);
+            if (_read >= _maxBytes) return 0;
             var remaining = (int)Math.Min(buffer.Length, _maxBytes - _read);
             var limited = buffer.Slice(0, remaining);
-            return _inner.ReadAsync(limited, ct).ContinueWith(t =>
-            {
-                _read += t.Result;
-                return t.Result;
-            }, ct);
+            var n = await _inner.ReadAsync(limited, ct).ConfigureAwait(false);
+            _read += n;
+            return n;
         }
 
         public override void Flush() { }
