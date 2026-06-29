@@ -95,7 +95,7 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
 
             _logger.LogInformation("YouTube resumable upload started for '{File}'.", recording.FileName);
 
-            var chunkSize = 10 * 1024 * 1024;
+            var chunkSize = 50 * 1024 * 1024;
             var buffer = new byte[chunkSize];
             long offset = 0;
 

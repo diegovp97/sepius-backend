@@ -70,7 +70,10 @@ public static class DependencyInjection
 
         // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
         services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
-        services.AddHttpClient<IYouTubeUploadService, YouTubeUploadService>();
+        services.AddHttpClient<IYouTubeUploadService, YouTubeUploadService>(client =>
+        {
+            client.Timeout = TimeSpan.FromHours(6);
+        });
 
         // Cola de subidas a YouTube — BackgroundService que procesa encolados
         services.AddSingleton<YouTubeUploadQueue>();
