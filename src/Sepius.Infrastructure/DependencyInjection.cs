@@ -10,6 +10,7 @@ using Sepius.Infrastructure.Persistence;
 using Sepius.Infrastructure.Streamlink;
 using Sepius.Infrastructure.TwitchApi;
 using Sepius.Infrastructure.YouTube;
+using Sepius.Infrastructure.Services;
 
 namespace Sepius.Infrastructure;
 
@@ -78,6 +79,9 @@ public static class DependencyInjection
         // Cola de subidas a YouTube — BackgroundService que procesa encolados
         services.AddSingleton<YouTubeUploadQueue>();
         services.AddHostedService(sp => sp.GetRequiredService<YouTubeUploadQueue>());
+
+        // ── AUTH ──────────────────────────────────────────────────────────────
+        services.AddScoped<IAuthService, AuthService>();
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
