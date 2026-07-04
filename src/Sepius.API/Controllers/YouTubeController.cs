@@ -45,4 +45,16 @@ public sealed class YouTubeController : ControllerBase
 
         return NoContent();
     }
+
+    /// <summary>Borra videos de YouTube buscando por título (nombre del archivo).</summary>
+    [HttpDelete("videos/by-title/{title}")]
+    [ProducesResponseType(typeof(object), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status500InternalServerError)]
+    public async Task<IActionResult> DeleteByTitle(string title, CancellationToken ct)
+    {
+        _logger.LogInformation("Solicitud de borrado por título: {Title}", title);
+        var deleted = await _youtube.DeleteByTitleAsync(title, ct);
+
+        return Ok(new { deleted, message = $"{deleted} video(s) eliminado(s)." });
+    }
 }

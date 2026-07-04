@@ -307,4 +307,71 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
             return false;
         }
     }
+
+    public async Task<int> DeleteByTitleAsync(string title, CancellationToken ct = default)
+    {
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.RefreshToken))
+            return 0;
+
+        try
+        {
+            var accessToken = await GetAccessTokenAsync(ct);
+            if (accessToken is null) return 0;
+
+            var searchUrl = $"{YouTubeApiBase}/search?part=snippet&q={Uri.EscapeDataString(title)}&type=video&maxResults=10";
+            var searchRequest = new HttpRequestMessage(HttpMethod.Get, searchUrl);
+            searchRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var searchResponse = await _http.SendAsync(searchRequest, ct);
+            if (!searchResponse.IsSuccessStatusCode)
+            {
+                var error = await searchResponse.Content.ReadAsStringAsync(ct);
+                _logger.LogError("YouTube search failed ({Status}): {Error}", searchResponse.StatusCode, error);
+                return 0;
+            }
+
+            var json = await searchResponse.Content.ReadAsStringAsync(ct);
+            var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("items", out var items))
+                return 0;
+
+            var deleted = 0;
+            foreach (var item in items.EnumerateArray())
+            {
+                var videoId = item.GetProperty("id").GetProperty("videoId").GetString();
+                if (string.IsNullOrEmpty(videoId)) continue;
+
+                var videoTitle = item.GetProperty("snippet").GetProperty("title").GetString() ?? "";
+                if (!videoTitle.Contains(title, StringComparison.OrdinalIgnoreCase))
+                {
+                    _logger.LogDebug("Skipping video '{VideoTitle}' - title does not match '{Title}'", videoTitle, title);
+                    continue;
+                }
+
+                var deleteUrl = $"{YouTubeApiBase}/videos?id={videoId}";
+                var deleteRequest = new HttpRequestMessage(HttpMethod.Delete, deleteUrl);
+                deleteRequest.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+                var deleteResponse = await _http.SendAsync(deleteRequest, ct);
+                if (deleteResponse.IsSuccessStatusCode)
+                {
+                    _logger.LogInformation("YouTube video deleted by title: {VideoId} ('{VideoTitle}')", videoId, videoTitle);
+                    deleted++;
+                }
+                else
+                {
+                    var error = await deleteResponse.Content.ReadAsStringAsync(ct);
+                    _logger.LogWarning("Failed to delete video {VideoId}: {Error}", videoId, error);
+                }
+            }
+
+            return deleted;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting YouTube videos by title '{Title}'.", title);
+            return 0;
+        }
+    }
 }
