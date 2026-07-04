@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Sepius.Application.DTOs;
 using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
 
@@ -16,6 +17,7 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
 
     private const string TokenUrl = "https://oauth2.googleapis.com/token";
     private const string UploadUrl = "https://www.googleapis.com/upload/youtube/v3/videos";
+    private const string YouTubeApiBase = "https://www.googleapis.com/youtube/v3";
 
     public YouTubeUploadService(
         IOptions<YouTubeOptions> options,
@@ -216,5 +218,93 @@ public sealed class YouTubeUploadService : IYouTubeUploadService
         {
             PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         });
+    }
+
+    public async Task<List<YouTubeVideoDto>> GetMyVideosAsync(CancellationToken ct = default)
+    {
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.RefreshToken))
+            return [];
+
+        try
+        {
+            var accessToken = await GetAccessTokenAsync(ct);
+            if (accessToken is null) return [];
+
+            var url = $"{YouTubeApiBase}/videos?part=snippet,status&myRating=like&maxResults=50";
+            var request = new HttpRequestMessage(HttpMethod.Get, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await _http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogError("YouTube list videos failed ({Status}): {Error}", response.StatusCode, error);
+                return [];
+            }
+
+            var json = await response.Content.ReadAsStringAsync(ct);
+            var doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("items", out var items))
+                return [];
+
+            var videos = new List<YouTubeVideoDto>();
+            foreach (var item in items.EnumerateArray())
+            {
+                var id = item.GetProperty("id").GetString() ?? "";
+                var snippet = item.GetProperty("snippet");
+                var title = snippet.GetProperty("title").GetString() ?? "";
+                var publishedAt = snippet.GetProperty("publishedAt").GetString() ?? "";
+                var privacyStatus = item.GetProperty("status").GetProperty("privacyStatus").GetString() ?? "";
+
+                var thumbnails = snippet.GetProperty("thumbnails");
+                var thumbnailUrl = "";
+                if (thumbnails.TryGetProperty("medium", out var med))
+                    thumbnailUrl = med.GetProperty("url").GetString() ?? "";
+                else if (thumbnails.TryGetProperty("default", out var def))
+                    thumbnailUrl = def.GetProperty("url").GetString() ?? "";
+
+                videos.Add(new YouTubeVideoDto(id, title, publishedAt, thumbnailUrl, privacyStatus));
+            }
+
+            return videos;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error listing YouTube videos.");
+            return [];
+        }
+    }
+
+    public async Task<bool> DeleteVideoAsync(string videoId, CancellationToken ct = default)
+    {
+        if (!_options.Enabled || string.IsNullOrWhiteSpace(_options.RefreshToken))
+            return false;
+
+        try
+        {
+            var accessToken = await GetAccessTokenAsync(ct);
+            if (accessToken is null) return false;
+
+            var url = $"{YouTubeApiBase}/videos?id={videoId}";
+            var request = new HttpRequestMessage(HttpMethod.Delete, url);
+            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+
+            var response = await _http.SendAsync(request, ct);
+            if (!response.IsSuccessStatusCode)
+            {
+                var error = await response.Content.ReadAsStringAsync(ct);
+                _logger.LogError("YouTube delete video failed ({Status}): {Error}", response.StatusCode, error);
+                return false;
+            }
+
+            _logger.LogInformation("YouTube video deleted: {VideoId}", videoId);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error deleting YouTube video {VideoId}.", videoId);
+            return false;
+        }
     }
 }

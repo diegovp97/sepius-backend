@@ -11,3 +11,11 @@ public record RecordingResponse(
     RecordingStatus Status,
     long FileSizeBytes
 );
+
+public record YouTubeVideoDto(
+    string Id,
+    string Title,
+    string PublishedAt,
+    string ThumbnailUrl,
+    string PrivacyStatus
+);

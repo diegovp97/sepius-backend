@@ -1,9 +1,10 @@
+using Sepius.Application.DTOs;
 using Sepius.Domain.Entities;
 
 namespace Sepius.Application.Interfaces;
 
 /// <summary>
-/// Contrato para subir grabaciones completadas a YouTube.
+/// Contrato para interactuar con YouTube (subir, listar, borrar).
 /// </summary>
 public interface IYouTubeUploadService
 {
@@ -12,4 +13,14 @@ public interface IYouTubeUploadService
     /// Devuelve el ID del video de YouTube si tiene éxito, o null si falla.
     /// </summary>
     Task<string?> UploadAsync(Recording recording, CancellationToken ct = default);
+
+    /// <summary>
+    /// Lista los videos subidos al canal de YouTube autenticado.
+    /// </summary>
+    Task<List<YouTubeVideoDto>> GetMyVideosAsync(CancellationToken ct = default);
+
+    /// <summary>
+    /// Borra un video de YouTube por su ID.
+    /// </summary>
+    Task<bool> DeleteVideoAsync(string videoId, CancellationToken ct = default);
 }
