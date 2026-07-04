@@ -23,4 +23,9 @@ public interface IYouTubeUploadService
     /// Borra un video de YouTube por su ID.
     /// </summary>
     Task<bool> DeleteVideoAsync(string videoId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Busca y borra videos de YouTube por título.
+    /// </summary>
+    Task<int> DeleteByTitleAsync(string title, CancellationToken ct = default);
 }
