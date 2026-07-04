@@ -89,6 +89,28 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
 
+    // Crear tabla auth_users si no existe y sembrar usuario por defecto
+    var conn = db.Database.GetDbConnection();
+    await conn.OpenAsync();
+    using var cmd = conn.CreateCommand();
+    cmd.CommandText = @"
+        CREATE TABLE IF NOT EXISTS auth_users (
+            id SERIAL PRIMARY KEY,
+            username TEXT NOT NULL,
+            password_hash TEXT NOT NULL,
+            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+        INSERT INTO auth_users (username, password_hash)
+        SELECT 'admin', @hash
+        WHERE NOT EXISTS (SELECT 1 FROM auth_users WHERE username = 'admin');
+    ";
+    var hashParam = cmd.CreateParameter();
+    hashParam.ParameterName = "@hash";
+    hashParam.Value = ComputeHash("sepius2026");
+    cmd.Parameters.Add(hashParam);
+    await cmd.ExecuteNonQueryAsync();
+    await conn.CloseAsync();
+
     // Sembrar canales configurados en Monitor__Channels
     var monitorOpts = scope.ServiceProvider.GetRequiredService<IOptions<MonitorOptions>>().Value;
     var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
@@ -138,3 +160,10 @@ app.MapControllers();
 }
 
 app.Run();
+
+static string ComputeHash(string input)
+{
+    using var sha = System.Security.Cryptography.SHA256.Create();
+    var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(input));
+    return Convert.ToBase64String(bytes);
+}

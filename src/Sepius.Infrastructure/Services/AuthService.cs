@@ -20,22 +20,32 @@ public class AuthService : IAuthService
 
     public async Task<bool> VerifyPasswordAsync(string username, string password)
     {
-        var user = await _db.AuthUsers.FirstOrDefaultAsync(u => u.Username == username);
-        if (user is null)
+        var conn = _db.Database.GetDbConnection();
+        await conn.OpenAsync();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT password_hash FROM auth_users WHERE username = @u";
+        var p = cmd.CreateParameter();
+        p.ParameterName = "@u";
+        p.Value = username;
+        cmd.Parameters.Add(p);
+        var result = await cmd.ExecuteScalarAsync();
+        await conn.CloseAsync();
+
+        if (result is null)
         {
             _logger.LogWarning("Auth attempt for unknown user: {Username}", username);
             return false;
         }
 
         var hash = HashPassword(password);
-        var valid = user.PasswordHash == hash;
+        var valid = (string)result == hash;
         if (!valid)
             _logger.LogWarning("Invalid password for user: {Username}", username);
 
         return valid;
     }
 
-    public static string HashPassword(string password)
+    private static string HashPassword(string password)
     {
         using var sha = SHA256.Create();
         var bytes = sha.ComputeHash(Encoding.UTF8.GetBytes(password));
