@@ -154,6 +154,34 @@ public sealed class RecordingsController : ControllerBase
         return Ok(files);
     }
 
+    /// <summary>Borra un archivo MP4 local del servidor.</summary>
+    [HttpDelete("file")]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public IActionResult DeleteFile([FromQuery] string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+            return BadRequest("filePath es obligatorio.");
+
+        if (!System.IO.File.Exists(filePath))
+            return NotFound($"Archivo no encontrado: {filePath}");
+
+        if (!filePath.StartsWith("/recordings/"))
+            return BadRequest("Solo se permiten archivos del directorio /recordings/.");
+
+        try
+        {
+            System.IO.File.Delete(filePath);
+            _logger.LogInformation("Archivo borrado: {FilePath}", filePath);
+            return NoContent();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error borrando archivo {FilePath}", filePath);
+            return StatusCode(500, "Error al borrar el archivo.");
+        }
+    }
+
     /// <summary>Sirve un archivo MP4 para streaming/preview/descarga con soporte de range requests.</summary>
     [HttpGet("stream")]
     [ProducesResponseType(StatusCodes.Status200OK)]
