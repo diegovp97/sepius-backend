@@ -285,7 +285,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         session.PipelineProcess?.Dispose();
 
         // Si la grabación MP4 existe y el stream terminó correctamente, notificar
-        if (finalStatus == TranscodeStatus.Stopped && File.Exists(mp4Path))
+        if (finalStatus is TranscodeStatus.Stopped or TranscodeStatus.Stopping && File.Exists(mp4Path))
         {
             var fileInfo = new FileInfo(mp4Path);
             if (fileInfo.Length > 0)
@@ -301,7 +301,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                     "[Transcode] Grabación MP4 completada: {Path} ({Size:N0} bytes)",
                     mp4Path, finalInfo.Length);
 
-                var recording = Recording.Create($"twitch:{channelName}", mp4Path);
+                var recording = Recording.Create(channelName, mp4Path);
                 recording.EndedAt = DateTime.UtcNow;
                 recording.Status = RecordingStatus.Completed;
                 recording.FileSizeBytes = finalInfo.Length;
