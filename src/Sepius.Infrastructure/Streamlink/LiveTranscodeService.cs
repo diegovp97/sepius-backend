@@ -136,7 +136,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-analyzeduration 10000000",
             "-probesize 5000000",
             "-i pipe:0",
-            "-map 0:v",
+            "-map 0:v?",
             "-map 0:a?",
             "-c copy",
             "-f hls",
