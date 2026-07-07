@@ -143,7 +143,6 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-hls_time 4",
             "-hls_list_size 20",
             "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
-            "-hls_allow_cache 0",
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename \"{segPattern}\"",
             $"\"{m3u8Path}\"",
