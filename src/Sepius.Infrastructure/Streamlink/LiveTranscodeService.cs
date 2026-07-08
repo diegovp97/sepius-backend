@@ -126,35 +126,23 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             _      => $"https://www.twitch.tv/{channelName}",
         };
 
-        var quality   = "best";
         var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
-
-        var slCmd = $"{_options.ExecutablePath} {streamUrl} {quality} --stdout 2>/tmp/sl_{sessionId}.log";
-        var ffArgs = string.Join(" ",
-            "-y",
-            "-fflags +discardcorrupt+genpts",
-            "-analyzeduration 10000000",
-            "-probesize 5000000",
-            "-i pipe:0",
-            "-map 0:v?",
-            "-map 0:a?",
-            "-c copy",
-            "-f hls",
-            "-hls_time 4",
-            "-hls_list_size 20",
-            "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
-            "-max_muxing_queue_size 1024",
-            $"-hls_segment_filename \"{segPattern}\"",
-            $"\"{m3u8Path}\"",
-            "-c copy",
-            "-max_muxing_queue_size 1024",
-            $"\"{mp4Path}\"");
+        var useYtDlp = platform == "twitch" && File.Exists(_options.TwitchCookiesPath);
 
         var scriptPath = $"/tmp/sepius_transcode_{sessionId}.sh";
-        var scriptContent = string.Join("\n",
-            "#!/bin/bash",
-            $"{slCmd} | \"{_options.FfmpegPath}\" {ffArgs} 2>&1");
+        var scriptContent = useYtDlp
+            ? BuildYtDlpScript(streamUrl, segPattern, m3u8Path, mp4Path)
+            : BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path);
         await File.WriteAllTextAsync(scriptPath, scriptContent, ct).ConfigureAwait(false);
+
+        if (useYtDlp)
+            _logger.LogInformation(
+                "[Transcode] Usando yt-dlp con cookies para '{Key}'. Cookies={CookiesPath}",
+                key, _options.TwitchCookiesPath);
+        else if (platform == "twitch")
+            _logger.LogWarning(
+                "[Transcode] Cookies de Twitch no encontradas en '{CookiesPath}'. Usando Streamlink; algunos canales pueden quedar audio-only.",
+                _options.TwitchCookiesPath);
 
         var psi = new ProcessStartInfo
         {
@@ -201,6 +189,9 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
             await proc.WaitForExitAsync(ct).ConfigureAwait(false);
 
+            if (proc.HasExited && proc.ExitCode != 0 && session.Status == TranscodeStatus.Running)
+                session.Status = TranscodeStatus.Failed;
+
             _logger.LogWarning(
                 "[Transcode] Proceso terminado para '{Key}'. exit={ExitCode}",
                 key, proc.HasExited ? proc.ExitCode : -1);
@@ -222,6 +213,96 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     }
 
     // ── Health Watchdog ────────────────────────────────────────────────────
+
+    private string BuildStreamlinkScript(
+        long sessionId,
+        string streamUrl,
+        string segPattern,
+        string m3u8Path,
+        string mp4Path)
+    {
+        var quality = string.IsNullOrWhiteSpace(_options.Quality) ? "best" : _options.Quality.Trim();
+        var additionalArgs = string.IsNullOrWhiteSpace(_options.AdditionalArgs) ? string.Empty : $" {_options.AdditionalArgs.Trim()}";
+        var slLogPath = $"/tmp/sl_{sessionId}.log";
+
+        var slCmd = string.Join(" ",
+            ShellQuote(_options.ExecutablePath) + additionalArgs,
+            ShellQuote(streamUrl),
+            ShellQuote(quality),
+            "--stdout",
+            $"2>{ShellQuote(slLogPath)}");
+
+        var ffArgs = string.Join(" ",
+            "-y",
+            "-fflags +discardcorrupt+genpts",
+            "-analyzeduration 10000000",
+            "-probesize 5000000",
+            "-i pipe:0",
+            "-map 0:v?",
+            "-map 0:a?",
+            "-c copy",
+            "-f hls",
+            "-hls_time 4",
+            "-hls_list_size 20",
+            "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
+            "-max_muxing_queue_size 1024",
+            $"-hls_segment_filename {ShellQuote(segPattern)}",
+            ShellQuote(m3u8Path),
+            "-c copy",
+            "-max_muxing_queue_size 1024",
+            ShellQuote(mp4Path));
+
+        return string.Join("\n",
+            "#!/bin/bash",
+            "set -o pipefail",
+            $"{slCmd} | {ShellQuote(_options.FfmpegPath)} {ffArgs}");
+    }
+
+    private string BuildYtDlpScript(
+        string streamUrl,
+        string segPattern,
+        string m3u8Path,
+        string mp4Path)
+    {
+        var height = Math.Clamp(_options.YtDlpTranscodeHeight, 240, 1080);
+        var teeTarget = string.Join("|",
+            $"[f=hls:hls_time=4:hls_list_size=20:hls_flags=delete_segments+append_list+omit_endlist+independent_segments:hls_segment_filename={segPattern}]{m3u8Path}",
+            $"[f=mp4:movflags=+faststart]{mp4Path}");
+
+        var ffArgs = string.Join(" ",
+            "-y",
+            "-fflags +discardcorrupt+genpts",
+            "-rw_timeout 15000000",
+            "-analyzeduration 10000000",
+            "-probesize 5000000",
+            "-i \"$url\"",
+            "-map 0:v:0",
+            "-map 0:a:0?",
+            $"-vf scale=-2:{height}",
+            "-c:v libx264",
+            "-preset ultrafast",
+            "-tune zerolatency",
+            "-pix_fmt yuv420p",
+            "-c:a aac",
+            "-b:a 128k",
+            "-ac 2",
+            "-max_muxing_queue_size 1024",
+            "-f tee",
+            ShellQuote(teeTarget));
+
+        return string.Join("\n",
+            "#!/bin/bash",
+            "set -euo pipefail",
+            "cookies=$(mktemp /tmp/sepius_twitch_cookies.XXXXXX)",
+            $"cp {ShellQuote(_options.TwitchCookiesPath)} \"$cookies\"",
+            "trap 'rm -f \"$cookies\"' EXIT",
+            $"url=$({ShellQuote(_options.YtDlpPath)} --cookies \"$cookies\" --no-warnings -f b -g {ShellQuote(streamUrl)} | head -n 1)",
+            "if [ -z \"$url\" ]; then",
+            "  echo \"[yt-dlp] No se pudo resolver URL HLS con vídeo.\" >&2",
+            "  exit 1",
+            "fi",
+            $"exec {ShellQuote(_options.FfmpegPath)} {ffArgs}");
+    }
 
     private void StartWatchdog(string key, TranscodeSession session, CancellationToken ct)
     {
@@ -380,6 +461,9 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     private static string Normalize(string channelName)
         => channelName.ToLowerInvariant().Trim();
+
+    private static string ShellQuote(string value)
+        => $"'{value.Replace("'", "'\\''")}'";
 
     private void PrepareOutputDir(string outputDir)
     {

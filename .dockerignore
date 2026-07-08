@@ -12,6 +12,9 @@
 # Ficheros sensibles (NUNCA commitear)
 **/.env
 **/*.env
+**/secrets/
+**/twitch-cookies.txt
+**/*.cookies.txt
 
 # Git
 **/.git/

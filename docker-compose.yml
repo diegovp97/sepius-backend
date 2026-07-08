@@ -40,6 +40,7 @@ services:
       - TwitchApi__RefreshToken=${TWITCH_REFRESH_TOKEN:-}
       - TwitchApi__RedirectUri=${TWITCH_REDIRECT_URI:-http://localhost}
       - Streamlink__OutputPath=/recordings
+      - Streamlink__TwitchCookiesPath=/run/secrets/sepius/twitch-cookies.txt
       - Monitor__PollingIntervalSeconds=120
       - Monitor__Channels__0=elttblue
       - Monitor__Channels__1=kick:elttblue
@@ -52,6 +53,7 @@ services:
       - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
     volumes:
       - recordings_data:/recordings
+      - ./secrets:/run/secrets/sepius:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval: 30s

@@ -31,7 +31,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3-pip \
     ffmpeg \
     curl \
-    && pip3 install streamlink --break-system-packages \
+    && pip3 install streamlink yt-dlp --break-system-packages \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 

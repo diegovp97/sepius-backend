@@ -10,6 +10,9 @@ obj/
 appsettings.Development.json
 client_secrets.json
 youtube_token/
+twitch-cookies.txt
+*.cookies.txt
+secrets/
 
 ## Docker
 *.override.yml
