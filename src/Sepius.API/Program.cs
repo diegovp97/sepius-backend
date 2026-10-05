@@ -1,4 +1,9 @@
 using System.Text.Json.Serialization;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.HttpOverrides;
+using Microsoft.IdentityModel.Tokens;
+using Sepius.API.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Sepius.API.Hubs;
@@ -54,6 +59,56 @@ builder.Services.AddHealthChecks();
 // SignalR — WebSockets para el chat en tiempo real
 builder.Services.AddSignalR();
 
+// ── AUTENTICACIÓN (JWT) ───────────────────────────────────────────────────────
+// La clave y la contraseña de admin SIEMPRE vienen de la configuración
+// (Auth__JwtKey / Auth__AdminPassword). No hay valores por defecto en el código.
+builder.Services.AddOptions<JwtOptions>()
+    .Bind(builder.Configuration.GetSection(JwtOptions.SectionName))
+    .Validate(o => o.JwtKey.Length >= 32, "Auth__JwtKey es obligatorio y debe tener al menos 32 caracteres")
+    .Validate(o => o.AdminPassword.Length >= 12, "Auth__AdminPassword es obligatorio y debe tener al menos 12 caracteres")
+    .ValidateOnStart();
+builder.Services.AddSingleton<TokenService>();
+
+var jwtSection = builder.Configuration.GetSection(JwtOptions.SectionName).Get<JwtOptions>() ?? new JwtOptions();
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(o =>
+    {
+        o.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidIssuer = jwtSection.Issuer,
+            ValidateAudience = true,
+            ValidAudience = jwtSection.Issuer,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            IssuerSigningKey = TokenService.BuildKey(jwtSection.JwtKey.PadRight(32, '_')),
+            ClockSkew = TimeSpan.FromMinutes(1),
+        };
+        // El reproductor <video> y los enlaces de descarga no pueden enviar cabeceras:
+        // para /api/recordings/stream se acepta el token en ?access_token=
+        o.Events = new JwtBearerEvents
+        {
+            OnMessageReceived = ctx =>
+            {
+                if (ctx.Request.Path.StartsWithSegments("/api/recordings/stream") &&
+                    ctx.Request.Query.TryGetValue("access_token", out var t))
+                    ctx.Token = t;
+                return Task.CompletedTask;
+            }
+        };
+    });
+builder.Services.AddAuthorization();
+
+// Límite de intentos de login: 5 por minuto y por IP
+builder.Services.AddRateLimiter(o =>
+{
+    o.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    o.AddPolicy("login", ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1) }));
+});
+
 // CORS para el frontend Angular
 // En producción, la URL viene de la variable de entorno AllowedOrigins
 builder.Services.AddCors(options =>
@@ -89,27 +144,25 @@ using (var scope = app.Services.CreateScope())
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.Migrate();
 
-    // Crear tabla auth_users si no existe y sembrar usuario por defecto
+    // Crear tabla auth_users si no existe y fijar la contraseña de admin desde la configuración
     var conn = db.Database.GetDbConnection();
     await conn.OpenAsync();
-    using var cmd = conn.CreateCommand();
-    cmd.CommandText = @"
-        CREATE TABLE IF NOT EXISTS auth_users (
-            id SERIAL PRIMARY KEY,
-            username TEXT NOT NULL,
-            password_hash TEXT NOT NULL,
-            created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-        );
-        INSERT INTO auth_users (username, password_hash)
-        SELECT 'admin', @hash
-        WHERE NOT EXISTS (SELECT 1 FROM auth_users WHERE username = 'admin');
-    ";
-    var hashParam = cmd.CreateParameter();
-    hashParam.ParameterName = "@hash";
-    hashParam.Value = ComputeHash("sepius2026");
-    cmd.Parameters.Add(hashParam);
-    await cmd.ExecuteNonQueryAsync();
+    using (var cmd = conn.CreateCommand())
+    {
+        cmd.CommandText = @"
+            CREATE TABLE IF NOT EXISTS auth_users (
+                id SERIAL PRIMARY KEY,
+                username TEXT NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            );";
+        await cmd.ExecuteNonQueryAsync();
+    }
     await conn.CloseAsync();
+
+    var jwtOpts = scope.ServiceProvider.GetRequiredService<IOptions<JwtOptions>>().Value;
+    await scope.ServiceProvider.GetRequiredService<IAuthService>()
+        .SetPasswordAsync("admin", jwtOpts.AdminPassword);
 
     // Sembrar canales configurados en Monitor__Channels
     var monitorOpts = scope.ServiceProvider.GetRequiredService<IOptions<MonitorOptions>>().Value;
@@ -128,9 +181,17 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI(c => c.SwaggerEndpoint("/swagger/v1/swagger.json", "Sepius v1"));
 }
 
+// Detrás de Caddy: respetar X-Forwarded-For/Proto (solo de proxies de confianza = loopback)
+app.UseForwardedHeaders(new ForwardedHeadersOptions
+{
+    ForwardedHeaders = ForwardedHeaders.XForwardedFor | ForwardedHeaders.XForwardedProto
+});
+
 // CORS ANTES de HTTPS redirect y cualquier otro middleware que responda
 app.UseCors("Angular");
-app.UseHttpsRedirection();
+app.UseRateLimiter();
+app.UseAuthentication();
+app.UseAuthorization();
 
 // Servir los ficheros HLS estáticos (/live/{channel}/index.m3u8 y segmentos .ts)
 // DEBE ir después de UseCors para que los headers CORS se apliquen
@@ -160,10 +221,3 @@ app.MapControllers();
 }
 
 app.Run();
-
-static string ComputeHash(string input)
-{
-    using var sha = System.Security.Cryptography.SHA256.Create();
-    var bytes = sha.ComputeHash(System.Text.Encoding.UTF8.GetBytes(input));
-    return Convert.ToBase64String(bytes);
-}

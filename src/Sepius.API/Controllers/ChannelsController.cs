@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Sepius.Application.DTOs;
 using Sepius.Application.Interfaces;
@@ -32,6 +33,7 @@ public sealed class ChannelsController : ControllerBase
     }
 
     /// <summary>Añade un canal a la lista de monitorización.</summary>
+    [Authorize]
     [HttpPost]
     [ProducesResponseType(typeof(ChannelResponse), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status409Conflict)]
@@ -53,6 +55,7 @@ public sealed class ChannelsController : ControllerBase
     }
 
     /// <summary>Elimina un canal. Si está grabando, detiene la grabación primero.</summary>
+    [Authorize]
     [HttpDelete("{id:guid}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

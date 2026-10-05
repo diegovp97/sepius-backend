@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Sepius.Application.DTOs;
 using Sepius.Application.Interfaces;
@@ -10,6 +11,7 @@ namespace Sepius.API.Controllers;
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
+[Authorize]
 public sealed class YouTubeController : ControllerBase
 {
     private readonly IYouTubeUploadService _youtube;

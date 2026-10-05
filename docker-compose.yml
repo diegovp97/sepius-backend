@@ -45,6 +45,9 @@ services:
       - Monitor__Channels__0=elttblue
       - Monitor__Channels__1=kick:elttblue
       - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
+      # Autenticación: ambas son obligatorias (la API no arranca sin ellas)
+      - Auth__JwtKey=${JWT_KEY:?define JWT_KEY en .env (openssl rand -base64 48)}
+      - Auth__AdminPassword=${ADMIN_PASSWORD:?define ADMIN_PASSWORD en .env (min. 12 caracteres)}
       - YouTube__Enabled=${YOUTUBE_ENABLED:-false}
       - YouTube__ClientId=${YOUTUBE_CLIENT_ID:-}
       - YouTube__ClientSecret=${YOUTUBE_CLIENT_SECRET:-}

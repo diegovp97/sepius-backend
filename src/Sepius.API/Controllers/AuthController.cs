@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.RateLimiting;
+using Sepius.API.Auth;
 using Sepius.Application.Interfaces;
 
 namespace Sepius.API.Controllers;
@@ -8,15 +10,23 @@ namespace Sepius.API.Controllers;
 public class AuthController : ControllerBase
 {
     private readonly IAuthService _auth;
+    private readonly TokenService _tokens;
 
-    public AuthController(IAuthService auth) => _auth = auth;
+    public AuthController(IAuthService auth, TokenService tokens)
+    {
+        _auth = auth;
+        _tokens = tokens;
+    }
 
     [HttpPost("verify")]
+    [EnableRateLimiting("login")]
     public async Task<IActionResult> Verify([FromBody] LoginRequest request)
     {
         var valid = await _auth.VerifyPasswordAsync(request.Username, request.Password);
         if (!valid) return Unauthorized();
-        return Ok(new { token = "ok" });
+
+        var (token, expiresAt) = _tokens.Create(request.Username);
+        return Ok(new { token, expiresAt });
     }
 }
 

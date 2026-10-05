@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Sepius.Application.Interfaces;
 
@@ -20,6 +21,7 @@ public sealed class LiveController : ControllerBase
         _logger = logger;
     }
 
+    [Authorize]
     [HttpPost("{channelName}/start")]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<IActionResult> Start(string channelName, [FromQuery] string platform = "twitch", CancellationToken ct = default)
@@ -35,6 +37,7 @@ public sealed class LiveController : ControllerBase
         });
     }
 
+    [Authorize]
     [HttpPost("{channelName}/stop")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     public async Task<IActionResult> Stop(string channelName, [FromQuery] string platform = "twitch")
