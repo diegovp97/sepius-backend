@@ -127,7 +127,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         };
 
         var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
-        var useYtDlp = platform == "twitch" && File.Exists(_options.TwitchCookiesPath);
+        var useYtDlp = platform == "twitch";
 
         var scriptPath = $"/tmp/sepius_transcode_{sessionId}.sh";
         var scriptContent = useYtDlp
@@ -137,12 +137,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
         if (useYtDlp)
             _logger.LogInformation(
-                "[Transcode] Usando yt-dlp con cookies para '{Key}'. Cookies={CookiesPath}",
-                key, _options.TwitchCookiesPath);
-        else if (platform == "twitch")
-            _logger.LogWarning(
-                "[Transcode] Cookies de Twitch no encontradas en '{CookiesPath}'. Usando Streamlink; algunos canales pueden quedar audio-only.",
-                _options.TwitchCookiesPath);
+                "[Transcode] Usando yt-dlp para '{Key}' (cookies de respaldo: {CookiesPath}, existe={CookiesExist})",
+                key, _options.TwitchCookiesPath, File.Exists(_options.TwitchCookiesPath));
 
         var psi = new ProcessStartInfo
         {
@@ -290,13 +286,20 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-f tee",
             ShellQuote(teeTarget));
 
+        // Primero sin cookies: los directos públicos dan vídeo así y unas cookies caducadas
+        // hacen que Twitch responda "subscriber-only". Las cookies solo se usan de respaldo.
+        var ytDlp = ShellQuote(_options.YtDlpPath);
         return string.Join("\n",
             "#!/bin/bash",
-            "set -euo pipefail",
+            "set -uo pipefail",
             "cookies=$(mktemp /tmp/sepius_twitch_cookies.XXXXXX)",
-            $"cp {ShellQuote(_options.TwitchCookiesPath)} \"$cookies\"",
             "trap 'rm -f \"$cookies\"' EXIT",
-            $"url=$({ShellQuote(_options.YtDlpPath)} --cookies \"$cookies\" --no-warnings -f b -g {ShellQuote(streamUrl)} | head -n 1)",
+            $"url=$({ytDlp} --no-warnings -f b -g {ShellQuote(streamUrl)} | head -n 1)",
+            $"if [ -z \"$url\" ] && [ -f {ShellQuote(_options.TwitchCookiesPath)} ]; then",
+            "  echo \"[yt-dlp] Sin cookies no hay vídeo; reintentando con cookies.\" >&2",
+            $"  cp {ShellQuote(_options.TwitchCookiesPath)} \"$cookies\"",
+            $"  url=$({ytDlp} --cookies \"$cookies\" --no-warnings -f b -g {ShellQuote(streamUrl)} | head -n 1)",
+            "fi",
             "if [ -z \"$url\" ]; then",
             "  echo \"[yt-dlp] No se pudo resolver URL HLS con vídeo.\" >&2",
             "  exit 1",
