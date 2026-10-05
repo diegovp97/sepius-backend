@@ -127,17 +127,17 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         };
 
         var segPattern = Path.Combine(outputDir, $"s{sessionId}_%04d.ts");
-        var useYtDlp = platform == "twitch";
+        var isTwitch = platform == "twitch";
 
         var scriptPath = $"/tmp/sepius_transcode_{sessionId}.sh";
-        var scriptContent = useYtDlp
-            ? BuildYtDlpScript(streamUrl, segPattern, m3u8Path, mp4Path)
+        var scriptContent = isTwitch
+            ? BuildTwitchScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path)
             : BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path);
         await File.WriteAllTextAsync(scriptPath, scriptContent, ct).ConfigureAwait(false);
 
-        if (useYtDlp)
+        if (isTwitch)
             _logger.LogInformation(
-                "[Transcode] Usando yt-dlp para '{Key}' (cookies de respaldo: {CookiesPath}, existe={CookiesExist})",
+                "[Transcode] Twitch '{Key}': Streamlink si ofrece vídeo; si no, yt-dlp (cookies de respaldo: {CookiesPath}, existe={CookiesExist})",
                 key, _options.TwitchCookiesPath, File.Exists(_options.TwitchCookiesPath));
 
         var psi = new ProcessStartInfo
@@ -252,6 +252,33 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "#!/bin/bash",
             "set -o pipefail",
             $"{slCmd} | {ShellQuote(_options.FfmpegPath)} {ffArgs}");
+    }
+
+    /// <summary>
+    /// Twitch: Streamlink (copia directa, sin transcodificar) si ofrece algún stream con vídeo;
+    /// si solo hay audio, yt-dlp (con cookies de respaldo).
+    /// </summary>
+    private string BuildTwitchScript(
+        long sessionId,
+        string streamUrl,
+        string segPattern,
+        string m3u8Path,
+        string mp4Path)
+    {
+        static string Body(string script) => string.Join("\n", script.Split('\n').Skip(1));
+
+        var additionalArgs = string.IsNullOrWhiteSpace(_options.AdditionalArgs) ? string.Empty : $" {_options.AdditionalArgs.Trim()}";
+        var hasVideo = $"timeout 30 {ShellQuote(_options.ExecutablePath)}{additionalArgs} --json {ShellQuote(streamUrl)} 2>/dev/null | grep -qE '\"[0-9]+p[0-9]*'";
+
+        return string.Join("\n",
+            "#!/bin/bash",
+            $"if {hasVideo}; then",
+            "  echo \"[Transcode] Streamlink ofrece vídeo; usando copia directa.\" >&2",
+            Body(BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path)),
+            "else",
+            "  echo \"[Transcode] Streamlink sin vídeo; usando yt-dlp.\" >&2",
+            Body(BuildYtDlpScript(streamUrl, segPattern, m3u8Path, mp4Path)),
+            "fi");
     }
 
     private string BuildYtDlpScript(
