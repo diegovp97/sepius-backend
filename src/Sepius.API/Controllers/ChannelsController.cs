@@ -15,12 +15,12 @@ namespace Sepius.API.Controllers;
 public sealed class ChannelsController : ControllerBase
 {
     private readonly IChannelRepository _channelRepo;
-    private readonly IStreamlinkService _streamlink;
+    private readonly IRecorderClient _recorder;
 
-    public ChannelsController(IChannelRepository channelRepo, IStreamlinkService streamlink)
+    public ChannelsController(IChannelRepository channelRepo, IRecorderClient recorder)
     {
         _channelRepo = channelRepo;
-        _streamlink = streamlink;
+        _recorder = recorder;
     }
 
     /// <summary>Devuelve todos los canales registrados con su estado actual.</summary>
@@ -29,7 +29,8 @@ public sealed class ChannelsController : ControllerBase
     public async Task<ActionResult<IEnumerable<ChannelResponse>>> GetAll(CancellationToken ct)
     {
         var channels = await _channelRepo.GetAllAsync(ct);
-        return Ok(channels.Select(ToResponse));
+        var recording = await RecordingChannelsAsync(ct);
+        return Ok(channels.Select(c => ToResponse(c, recording.Contains(c.Name))));
     }
 
     /// <summary>Añade un canal a la lista de monitorización.</summary>
@@ -51,7 +52,7 @@ public sealed class ChannelsController : ControllerBase
         var channel = Channel.Create(request.Name);
         await _channelRepo.AddAsync(channel, ct);
 
-        return CreatedAtAction(nameof(GetAll), ToResponse(channel));
+        return CreatedAtAction(nameof(GetAll), ToResponse(channel, isRecording: false));
     }
 
     /// <summary>Elimina un canal. Si está grabando, detiene la grabación primero.</summary>
@@ -67,8 +68,14 @@ public sealed class ChannelsController : ControllerBase
         if (channel is null)
             return NotFound($"Canal con ID '{id}' no encontrado.");
 
-        if (_streamlink.IsRecording(channel.Name))
-            await _streamlink.StopRecordingAsync(channel.Name);
+        // Si está grabando, se detiene primero (en el grabador). Si el grabador no responde, se borra igualmente.
+        try
+        {
+            var sessions = await _recorder.GetSessionsAsync(ct);
+            foreach (var s in sessions.Where(s => s.Channel.Equals(channel.Name, StringComparison.OrdinalIgnoreCase)))
+                await _recorder.StopAsync(s.Channel, s.Platform, ct);
+        }
+        catch (HttpRequestException) { }
 
         await _channelRepo.RemoveAsync(id, ct);
         return NoContent();
@@ -76,11 +83,18 @@ public sealed class ChannelsController : ControllerBase
 
     // Mapeo de entidad de dominio → DTO de respuesta.
     // El controlador es responsable de esta traducción, no el servicio.
-    private ChannelResponse ToResponse(Channel c) => new(
+    private static ChannelResponse ToResponse(Channel c, bool isRecording) => new(
         c.Id,
         c.Name,
         c.IsMonitored,
         c.AddedAt,
-        _streamlink.IsRecording(c.Name)
+        isRecording
     );
+
+    /// <summary>Nombres de los canales que el grabador está grabando ahora mismo.</summary>
+    private async Task<HashSet<string>> RecordingChannelsAsync(CancellationToken ct)
+    {
+        var sessions = await _recorder.GetSessionsAsync(ct);
+        return new HashSet<string>(sessions.Select(s => s.Channel), StringComparer.OrdinalIgnoreCase);
+    }
 }

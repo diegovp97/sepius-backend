@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Sepius.Application.DTOs;
 using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
 
@@ -26,6 +27,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     private readonly StreamlinkOptions _options;
     private readonly ILogger<LiveTranscodeService> _logger;
     private bool _disposed;
+    private int _pendingHandlers; // handlers de RecordingCompleted aún en ejecución
 
     private static readonly Regex ValidChannelName =
         new(@"^[a-z0-9_]{1,25}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
@@ -60,6 +62,14 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     {
         return $"/live/{NormalizePlatform(platform)}/{Normalize(channelName)}/index.m3u8";
     }
+
+    public IReadOnlyList<LiveSessionDto> GetActiveSessions()
+        => _active
+            .Where(kv => kv.Value.Status is TranscodeStatus.Starting or TranscodeStatus.Running)
+            .Select(kv => new LiveSessionDto(
+                kv.Key.Split(':')[0], kv.Value.Channel, kv.Value.StartedAt, kv.Value.Status.ToString()))
+            .OrderBy(x => x.StartedAt)
+            .ToList();
 
     // ── Inicio ─────────────────────────────────────────────────────────────
 
@@ -102,6 +112,31 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    public async Task StopAllAsync(TimeSpan timeout)
+    {
+        var sessions = _active.ToArray();
+        if (sessions.Length == 0 && Volatile.Read(ref _pendingHandlers) == 0) return;
+
+        _logger.LogInformation("[Transcode] Apagando: cierre limpio de {Count} sesión(es)…", sessions.Length);
+
+        // KillSession bloquea hasta que ffmpeg cierra el MP4: se lanza en paralelo.
+        var kills = sessions.Select(kv => Task.Run(() =>
+        {
+            kv.Value.Status = TranscodeStatus.Stopping;
+            KillSession(kv.Value, kv.Key);
+        })).ToArray();
+
+        // Se espera a que acaben los procesos, la limpieza (faststart) y los handlers
+        // (que apuntan la grabación en la cola de subida) antes de dejar que el host se cierre.
+        var deadline = DateTime.UtcNow + timeout;
+        while (DateTime.UtcNow < deadline &&
+               (!_active.IsEmpty || Volatile.Read(ref _pendingHandlers) > 0 || kills.Any(k => !k.IsCompleted)))
+            await Task.Delay(250).ConfigureAwait(false);
+
+        if (!_active.IsEmpty)
+            _logger.LogWarning("[Transcode] Quedaban {Count} sesión(es) al agotar el tiempo de apagado.", _active.Count);
     }
 
     // ── Pipeline principal ─────────────────────────────────────────────────
@@ -576,6 +611,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         var handler = RecordingCompleted;
         if (handler is null) return;
 
+        Interlocked.Increment(ref _pendingHandlers);
         Task.Run(async () =>
         {
             try { await handler(recording); }
@@ -585,6 +621,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                     "Error en handler de RecordingCompleted para '{Channel}'",
                     recording.ChannelName);
             }
+            finally { Interlocked.Decrement(ref _pendingHandlers); }
         });
     }
 

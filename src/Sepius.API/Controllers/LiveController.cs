@@ -5,98 +5,73 @@ using Sepius.Application.Interfaces;
 namespace Sepius.API.Controllers;
 
 /// <summary>
-/// Controla el pipeline de transcoding en vivo (streamlink → ffmpeg → HLS).
+/// Estado y control del directo. El pipeline (streamlink → ffmpeg → HLS) vive en el grabador
+/// (sepius-recorder); esta API solo le pregunta, así que reiniciarla no corta ninguna grabación.
+/// Los ficheros HLS se sirven desde el volumen compartido en /live/...
 /// </summary>
 [ApiController]
 [Route("api/[controller]")]
 [Produces("application/json")]
 public sealed class LiveController : ControllerBase
 {
-    private readonly ILiveTranscodeService _live;
+    private readonly IRecorderClient _recorder;
     private readonly ILogger<LiveController> _logger;
 
-    public LiveController(ILiveTranscodeService live, ILogger<LiveController> logger)
+    public LiveController(IRecorderClient recorder, ILogger<LiveController> logger)
     {
-        _live   = live;
-        _logger = logger;
+        _recorder = recorder;
+        _logger   = logger;
     }
 
     [Authorize]
     [HttpPost("{channelName}/start")]
     [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
     public async Task<IActionResult> Start(string channelName, [FromQuery] string platform = "twitch", CancellationToken ct = default)
     {
-        _logger.LogInformation("[Live] POST /start \u2192 canal='{Channel}' platform='{Platform}'", channelName, platform);
-        await _live.StartAsync(channelName, platform, ct);
-        var hlsUrl = _live.GetHlsUrl(channelName, platform);
-        _logger.LogInformation("[Live] Transcode arrancado. hlsUrl='{Url}'", hlsUrl);
-        return Ok(new
+        _logger.LogInformation("[Live] POST /start → canal='{Channel}' platform='{Platform}'", channelName, platform);
+        try
         {
-            hlsUrl,
-            message = "Transcode iniciado. El stream estará listo en unos segundos."
-        });
+            var hlsUrl = await _recorder.StartAsync(channelName, platform, ct);
+            return Ok(new
+            {
+                hlsUrl,
+                message = "Transcode iniciado. El stream estará listo en unos segundos."
+            });
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning("[Live] El grabador no pudo arrancar '{Channel}': {Reason}", channelName, ex.Message);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "El grabador no responde." });
+        }
     }
 
     [Authorize]
     [HttpPost("{channelName}/stop")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
-    public async Task<IActionResult> Stop(string channelName, [FromQuery] string platform = "twitch")
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> Stop(string channelName, [FromQuery] string platform = "twitch", CancellationToken ct = default)
     {
-        _logger.LogInformation("[Live] POST /stop \u2192 canal='{Channel}' platform='{Platform}'", channelName, platform);
-        await _live.StopAsync(channelName, platform);
-        return NoContent();
+        _logger.LogInformation("[Live] POST /stop → canal='{Channel}' platform='{Platform}'", channelName, platform);
+        try
+        {
+            await _recorder.StopAsync(channelName, platform, ct);
+            return NoContent();
+        }
+        catch (HttpRequestException ex)
+        {
+            _logger.LogWarning("[Live] El grabador no pudo parar '{Channel}': {Reason}", channelName, ex.Message);
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "El grabador no responde." });
+        }
     }
 
     [HttpGet("{channelName}/status")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public IActionResult Status(string channelName, [FromQuery] string platform = "twitch")
-    {
-        var isTranscoding = _live.IsTranscoding(channelName, platform);
-        var isReady       = _live.IsHlsReady(channelName, platform);
-        _logger.LogDebug("[Live] GET /status \u2192 canal='{Channel}' platform='{Platform}' transcoding={T} ready={R}",
-            channelName, platform, isTranscoding, isReady);
-        return Ok(new
-        {
-            isTranscoding,
-            isReady,
-            hlsUrl = _live.GetHlsUrl(channelName, platform)
-        });
-    }
+    public async Task<IActionResult> Status(string channelName, [FromQuery] string platform = "twitch", CancellationToken ct = default)
+        => Ok(await _recorder.GetStatusAsync(channelName, platform, ct));
 
     [HttpGet("{channelName}/active")]
     [ProducesResponseType(StatusCodes.Status200OK)]
-    public IActionResult Active(string channelName)
-    {
-        string[] platforms = ["kick", "twitch"];
-
-        foreach (var platform in platforms)
-        {
-            if (_live.IsTranscoding(channelName, platform))
-            {
-                var hlsUrl  = _live.GetHlsUrl(channelName, platform);
-                var isReady = _live.IsHlsReady(channelName, platform);
-                _logger.LogInformation(
-                    "[Live] GET /active \u2192 canal='{Channel}' LIVE en '{Platform}' | ready={Ready} | url={Url}",
-                    channelName, platform, isReady, hlsUrl);
-                return Ok(new
-                {
-                    isLive  = true,
-                    platform,
-                    channel = channelName,
-                    hlsUrl,
-                    isReady
-                });
-            }
-        }
-
-        _logger.LogDebug("[Live] GET /active \u2192 canal='{Channel}' offline (ning\u00fan transcode activo).", channelName);
-        return Ok(new
-        {
-            isLive   = false,
-            platform = (string?)null,
-            channel  = channelName,
-            hlsUrl   = (string?)null,
-            isReady  = false
-        });
-    }
+    public async Task<IActionResult> Active(string channelName, CancellationToken ct = default)
+        => Ok(await _recorder.GetActiveAsync(channelName, ct));
 }

@@ -12,12 +12,12 @@ namespace Sepius.API.Controllers;
 public sealed class StatusController : ControllerBase
 {
     private readonly IChannelRepository _channelRepo;
-    private readonly IStreamlinkService _streamlink;
+    private readonly IRecorderClient _recorder;
 
-    public StatusController(IChannelRepository channelRepo, IStreamlinkService streamlink)
+    public StatusController(IChannelRepository channelRepo, IRecorderClient recorder)
     {
         _channelRepo = channelRepo;
-        _streamlink = streamlink;
+        _recorder = recorder;
     }
 
     /// <summary>Devuelve un resumen del estado actual del sistema.</summary>
@@ -25,15 +25,15 @@ public sealed class StatusController : ControllerBase
     public async Task<IActionResult> Get(CancellationToken ct)
     {
         var channels = await _channelRepo.GetAllAsync(ct);
-        var active = _streamlink.GetActiveRecordings();
+        var sessions = await _recorder.GetSessionsAsync(ct);
 
         return Ok(new
         {
             Status = "running",
             Timestamp = DateTime.UtcNow,
             MonitoredChannels = channels.Count(c => c.IsMonitored),
-            ActiveRecordings = active.Count,
-            ActiveChannels = active.Select(r => r.ChannelName)
+            ActiveRecordings = sessions.Count,
+            ActiveChannels = sessions.Select(s => s.Channel)
         });
     }
 }

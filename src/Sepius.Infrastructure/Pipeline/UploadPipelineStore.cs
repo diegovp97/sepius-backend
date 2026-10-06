@@ -87,6 +87,22 @@ public sealed class UploadPipelineStore(IServiceScopeFactory scopes)
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Filas que ningún intento ha tocado aún (el grabador acaba de apuntarlas, o la API se reinició a mitad).
+    /// Las que ya fallaron alguna vez (intentos &gt; 0) van por el barrido lento con espera.
+    /// </summary>
+    public async Task<List<UploadPipeline>> ListUntriedAsync(bool driveEnabled, bool youTubeEnabled, CancellationToken ct = default)
+    {
+        using var scope = scopes.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+        return await db.UploadPipelines.AsNoTracking()
+            .Where(x =>
+                (driveEnabled && x.DriveStatus == PipelineStepStatus.Pending && x.DriveAttempts == 0) ||
+                (youTubeEnabled && x.YouTubeStatus == PipelineStepStatus.Pending && x.YouTubeAttempts == 0))
+            .OrderBy(x => x.CreatedAt)
+            .ToListAsync(ct);
+    }
+
     public async Task<List<UploadPipeline>> ListRecentAsync(int take, CancellationToken ct = default)
     {
         using var scope = scopes.CreateScope();

@@ -7,7 +7,6 @@ using Sepius.API.Auth;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using Sepius.API.Hubs;
-using Sepius.API.Workers;
 using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
 using Sepius.Infrastructure;
@@ -30,17 +29,11 @@ var builder = WebApplication.CreateBuilder(args);
 
 // ── SERVICIOS / CONTENEDOR DI ─────────────────────────────────────────────────
 
-// Registrar toda la capa de infraestructura via el extension method
-builder.Services.AddInfrastructure(builder.Configuration);
-
-// Registrar opciones del worker y el worker en sí como HostedService
-// AddHostedService = el host lo inicia/detiene automáticamente
-builder.Services.Configure<MonitorOptions>(
-    builder.Configuration.GetSection(MonitorOptions.SectionName));
-// TwitchEventSubWorker: eventos Twitch en tiempo real vía WebSocket
-builder.Services.AddHostedService<TwitchEventSubWorker>();
-// TwitchMonitorWorker: polling para plataformas no-Twitch (Kick)
-builder.Services.AddHostedService<TwitchMonitorWorker>();
+// Infraestructura común (BD, canales, pipeline) + lo propio de la API (login, subidas, cliente del grabador).
+// La API ya NO ejecuta ffmpeg/Streamlink ni los workers de Twitch: viven en sepius-recorder, de modo que
+// reiniciar la API no interrumpe ninguna grabación.
+builder.Services.AddInfrastructureCore(builder.Configuration);
+builder.Services.AddApiInfrastructure(builder.Configuration);
 
 // Controladores con serialización de enums como strings
 // (envía "Completed" al frontend en lugar del entero 1)
@@ -163,16 +156,6 @@ using (var scope = app.Services.CreateScope())
     var jwtOpts = scope.ServiceProvider.GetRequiredService<IOptions<JwtOptions>>().Value;
     await scope.ServiceProvider.GetRequiredService<IAuthService>()
         .SetPasswordAsync("admin", jwtOpts.AdminPassword);
-
-    // Sembrar canales configurados en Monitor__Channels
-    var monitorOpts = scope.ServiceProvider.GetRequiredService<IOptions<MonitorOptions>>().Value;
-    var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
-    foreach (var name in monitorOpts.Channels.Where(n => !string.IsNullOrWhiteSpace(n)))
-    {
-        var existing = await channelRepo.GetByNameAsync(name);
-        if (existing is null)
-            await channelRepo.AddAsync(Channel.Create(name));
-    }
 }
 
 if (app.Environment.IsDevelopment())
@@ -202,35 +185,7 @@ app.MapHub<ChatHub>("/hubs/chat");
 
 app.MapControllers();
 
-// ── WIRING DE EVENTOS ────────────────────────────────────────────────────
-// Suscribir RecordingCompleted de LiveTranscodeService a la cola de YouTube.
-// El upload automático pasa por la cola para evitar subidas concurrentes.
-{
-    var liveTranscode = app.Services.GetRequiredService<ILiveTranscodeService>();
-    var uploadQueue = app.Services.GetRequiredService<YouTubeUploadQueue>();
-
-    // Las grabaciones muy cortas (p. ej. el clip de anuncio de Twitch de ~16 s o un arranque fallido)
-    // no se suben a Drive ni a YouTube. Configurable con Pipeline__MinDurationMinutes (0 = subir todo).
-    var minDuration = TimeSpan.FromMinutes(Math.Max(0, app.Configuration.GetValue<int?>("Pipeline:MinDurationMinutes") ?? 5));
-
-    liveTranscode.RecordingCompleted += (recording) =>
-    {
-        var logger = app.Services.GetRequiredService<ILogger<Program>>();
-
-        if (recording.Duration < minDuration)
-        {
-            logger.LogWarning(
-                "Grabación de '{Channel}' demasiado corta ({Seconds:F0} s < {Min} min): no se sube. Fichero: {File}",
-                recording.ChannelName, recording.Duration.TotalSeconds, minDuration.TotalMinutes, recording.FileName);
-            return Task.CompletedTask;
-        }
-
-        logger.LogInformation(
-            "Grabación completada para '{Channel}'. Encolando subida (Drive → YouTube)...",
-            recording.ChannelName);
-        uploadQueue.Enqueue(recording);
-        return Task.CompletedTask;
-    };
-}
+// Las grabaciones terminadas ya no llegan por un evento en memoria: el grabador (otro proceso) las apunta
+// en la tabla upload_pipeline y la cola de subida (YouTubeUploadQueue) las recoge de ahí.
 
 app.Run();

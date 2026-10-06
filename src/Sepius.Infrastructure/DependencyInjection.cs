@@ -7,6 +7,7 @@ using Microsoft.Extensions.Options;
 using Microsoft.EntityFrameworkCore;
 using Sepius.Application.Interfaces;
 using Sepius.Infrastructure.Persistence;
+using Sepius.Infrastructure.Recorder;
 using Sepius.Infrastructure.Streamlink;
 using Sepius.Infrastructure.TwitchApi;
 using Sepius.Infrastructure.Drive;
@@ -28,72 +29,22 @@ namespace Sepius.Infrastructure;
 /// </summary>
 public static class DependencyInjection
 {
-    public static IServiceCollection AddInfrastructure(
+    /// <summary>
+    /// Lo que necesitan los DOS procesos (API y grabador): base de datos, canales y estado del pipeline.
+    /// </summary>
+    public static IServiceCollection AddInfrastructureCore(
         this IServiceCollection services,
         IConfiguration configuration)
     {
-        // ── CONFIGURACIÓN (IOptions<T>) ──────────────────────────────────────
-        // Mapea la sección del JSON a una clase fuertemente tipada.
-        // En los servicios se inyecta IOptions<TwitchApiOptions> en lugar de
-        // IConfiguration directamente (más testeable y tipado).
-        services.AddOptions<TwitchApiOptions>()
-            .Bind(configuration.GetSection(TwitchApiOptions.SectionName))
-            .Validate(o => !string.IsNullOrWhiteSpace(o.ClientId),     "TwitchApi__ClientId es obligatorio")
-            .Validate(o => !string.IsNullOrWhiteSpace(o.ClientSecret), "TwitchApi__ClientSecret es obligatorio")
+        // Ruta de grabaciones (volumen compartido): la API sirve el HLS y los .mp4, el grabador los escribe.
+        services.Configure<StreamlinkOptions>(configuration.GetSection(StreamlinkOptions.SectionName));
+        services.Configure<PipelineOptions>(configuration.GetSection(PipelineOptions.SectionName));
+
+        // Clave compartida API ↔ grabador (Recorder__Key): sin ella no arranca ninguno de los dos.
+        services.AddOptions<RecorderOptions>()
+            .Bind(configuration.GetSection(RecorderOptions.SectionName))
+            .Validate(o => o.Key.Length >= 16, "Recorder__Key es obligatorio y debe tener al menos 16 caracteres")
             .ValidateOnStart();
-
-        services.Configure<StreamlinkOptions>(
-            configuration.GetSection(StreamlinkOptions.SectionName));
-
-        // ── REPOSITORIOS (Singleton) ─────────────────────────────────────────
-        // Singleton = una sola instancia para toda la vida de la app.
-        // Correcto para almacenamiento en memoria que debe persistir entre requests.
-        services.AddSingleton<IChannelRepository, InMemoryChannelRepository>();
-
-        // ── SERVICIOS DE PROCESO (Singleton) ────────────────────────────────
-        // Los procesos del SO deben sobrevivir entre peticiones HTTP.
-        // Al ser Singleton y IDisposable, el host lo destruye correctamente al apagarse.
-        services.AddSingleton<IStreamlinkService, StreamlinkService>();
-
-        // Singleton para el pipeline streamlink→ffmpeg→HLS (también IDisposable)
-        services.AddSingleton<ILiveTranscodeService, LiveTranscodeService>();
-
-        // ── HTTP CLIENT (Twitch API) ─────────────────────────────────────────
-        // AddHttpClient registra TwitchApiService como Singleton con un HttpClient
-        // gestionado por IHttpClientFactory (evita socket exhaustion).
-        // El HttpClient se crea una vez y se reutiliza. Es el equivalente a crear
-        // una instancia global de axios con configuración base.
-        services.AddHttpClient<ITwitchApiService, TwitchApiService>();
-
-        // Cliente HTTP nombrado para la API pública de Kick
-        services.AddHttpClient("Kick", client =>
-        {
-            client.Timeout = TimeSpan.FromSeconds(15);
-        });
-
-        // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
-        services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
-        services.AddHttpClient<IYouTubeUploadService, YouTubeUploadService>(client =>
-        {
-            client.Timeout = TimeSpan.FromHours(6);
-        });
-
-        // Cola de subidas a YouTube — BackgroundService que procesa encolados
-        // Copia de seguridad en Google Drive (desactivada por defecto: GoogleDrive__Enabled)
-        services.Configure<GoogleDriveOptions>(configuration.GetSection(GoogleDriveOptions.SectionName));
-        services.AddHttpClient<IDriveUploadService, GoogleDriveService>(client =>
-        {
-            client.Timeout = TimeSpan.FromHours(6);
-        });
-
-        // Estado persistente del pipeline (Drive → YouTube) en Postgres
-        services.AddSingleton<UploadPipelineStore>();
-
-        services.AddSingleton<YouTubeUploadQueue>();
-        services.AddHostedService(sp => sp.GetRequiredService<YouTubeUploadQueue>());
-
-        // ── AUTH ──────────────────────────────────────────────────────────────
-        services.AddScoped<IAuthService, AuthService>();
 
         // ── BASE DE DATOS (PostgreSQL + EF Core) ─────────────────────────────
         var rawConn = configuration.GetConnectionString("Postgres") ?? "";
@@ -113,6 +64,80 @@ public static class DependencyInjection
         }
         services.AddDbContext<AppDbContext>(opts =>
             opts.UseNpgsql(connectionString));
+
+        // Canales en Postgres: los dos procesos tienen que ver la misma lista.
+        services.AddSingleton<IChannelRepository, EfChannelRepository>();
+
+        // Estado persistente del pipeline (grabación → Drive → YouTube) en Postgres
+        services.AddSingleton<UploadPipelineStore>();
+
+        return services;
+    }
+
+    /// <summary>
+    /// Solo la API: login, subidas a Drive/YouTube (cola) y el cliente que habla con el grabador.
+    /// La API ya NO ejecuta ffmpeg ni Streamlink.
+    /// </summary>
+    public static IServiceCollection AddApiInfrastructure(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddScoped<IAuthService, AuthService>();
+
+        // ── YOUTUBE UPLOAD ───────────────────────────────────────────────────
+        services.Configure<YouTubeOptions>(configuration.GetSection(YouTubeOptions.SectionName));
+        services.AddHttpClient<IYouTubeUploadService, YouTubeUploadService>(client =>
+        {
+            client.Timeout = TimeSpan.FromHours(6);
+        });
+
+        // Copia de seguridad en Google Drive (desactivada por defecto: GoogleDrive__Enabled)
+        services.Configure<GoogleDriveOptions>(configuration.GetSection(GoogleDriveOptions.SectionName));
+        services.AddHttpClient<IDriveUploadService, GoogleDriveService>(client =>
+        {
+            client.Timeout = TimeSpan.FromHours(6);
+        });
+
+        // Cola del pipeline: recoge las grabaciones que apunta el grabador y las sube (Drive → YouTube)
+        services.AddSingleton<YouTubeUploadQueue>();
+        services.AddHostedService(sp => sp.GetRequiredService<YouTubeUploadQueue>());
+
+        // Cliente de la API interna del grabador (red de Docker, con clave)
+        services.AddHttpClient<IRecorderClient, HttpRecorderClient>((sp, client) =>
+        {
+            var o = sp.GetRequiredService<IOptions<RecorderOptions>>().Value;
+            client.BaseAddress = new Uri(o.BaseUrl.TrimEnd('/') + "/");
+            client.DefaultRequestHeaders.Add(RecorderOptions.KeyHeader, o.Key);
+            client.Timeout = TimeSpan.FromSeconds(5);
+        });
+
+        return services;
+    }
+
+    /// <summary>
+    /// Solo el grabador: Twitch/Kick, ffmpeg/Streamlink y el apunte de grabaciones terminadas.
+    /// </summary>
+    public static IServiceCollection AddRecorderInfrastructure(
+        this IServiceCollection services,
+        IConfiguration configuration)
+    {
+        services.AddOptions<TwitchApiOptions>()
+            .Bind(configuration.GetSection(TwitchApiOptions.SectionName))
+            .Validate(o => !string.IsNullOrWhiteSpace(o.ClientId),     "TwitchApi__ClientId es obligatorio")
+            .Validate(o => !string.IsNullOrWhiteSpace(o.ClientSecret), "TwitchApi__ClientSecret es obligatorio")
+            .ValidateOnStart();
+
+        // Singleton para el pipeline streamlink→ffmpeg→HLS (también IDisposable)
+        services.AddSingleton<ILiveTranscodeService, LiveTranscodeService>();
+        services.AddSingleton<RecordingIntake>();
+
+        services.AddHttpClient<ITwitchApiService, TwitchApiService>();
+
+        // Cliente HTTP nombrado para la API pública de Kick
+        services.AddHttpClient("Kick", client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(15);
+        });
 
         return services;
     }

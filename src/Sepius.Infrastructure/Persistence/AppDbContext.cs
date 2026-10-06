@@ -7,9 +7,18 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
 {
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<UploadPipeline> UploadPipelines => Set<UploadPipeline>();
+    public DbSet<Channel> Channels => Set<Channel>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<Channel>(e =>
+        {
+            e.ToTable("channels");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Name).HasMaxLength(64).IsRequired();
+            e.HasIndex(x => x.Name).IsUnique();
+        });
+
         modelBuilder.Entity<UploadPipeline>(e =>
         {
             e.ToTable("upload_pipeline");

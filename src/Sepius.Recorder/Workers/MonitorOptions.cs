@@ -1,4 +1,4 @@
-namespace Sepius.API.Workers;
+namespace Sepius.Recorder.Workers;
 
 /// <summary>
 /// Opciones de configuración del worker de monitorización.

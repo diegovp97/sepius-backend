@@ -50,6 +50,16 @@ public sealed class YouTubeUploadQueue : BackgroundService
     private static readonly TimeSpan SweepInterval = TimeSpan.FromMinutes(30);
     private static readonly TimeSpan RetryAfter = TimeSpan.FromMinutes(10);
 
+    /// <summary>Cada cuánto se miran las filas nuevas que apunta el grabador (otro proceso).</summary>
+    private static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(15);
+
+    /// <summary>
+    /// Ficheros que esta instancia ya ha procesado hace poco. Evita que la recogida rápida repita una subida
+    /// si, por ejemplo, falló el guardado del estado justo después de subir a YouTube (se duplicaría el vídeo).
+    /// </summary>
+    private static readonly TimeSpan HandledMemory = TimeSpan.FromMinutes(30);
+    private readonly ConcurrentDictionary<string, DateTime> _handled = new();
+
     private readonly ConcurrentQueue<UploadJob> _queue = new();
     private readonly ConcurrentDictionary<string, UploadJob> _jobs = new();
     private readonly ConcurrentDictionary<string, string> _activeByPath = new(); // ruta → jobId
@@ -108,6 +118,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
 
         // El primer barrido recupera lo que quedó a medias antes de un reinicio.
         var nextSweep = DateTime.UtcNow;
+        var nextPoll = DateTime.UtcNow + PollInterval;
         var firstSweep = true;
 
         while (!stoppingToken.IsCancellationRequested)
@@ -117,6 +128,12 @@ public sealed class YouTubeUploadQueue : BackgroundService
                 await SweepAsync(includeRecent: firstSweep, stoppingToken);
                 firstSweep = false;
                 nextSweep = DateTime.UtcNow + SweepInterval;
+                nextPoll = DateTime.UtcNow + PollInterval;
+            }
+            else if (DateTime.UtcNow >= nextPoll)
+            {
+                await PollNewAsync(stoppingToken);
+                nextPoll = DateTime.UtcNow + PollInterval;
             }
 
             if (_queue.TryDequeue(out var job))
@@ -124,6 +141,41 @@ public sealed class YouTubeUploadQueue : BackgroundService
             else
                 await Task.Delay(1000, stoppingToken);
         }
+    }
+
+    /// <summary>Recoge las filas que el grabador acaba de apuntar (ningún intento todavía) y las encola.</summary>
+    private async Task PollNewAsync(CancellationToken ct)
+    {
+        try
+        {
+            var rows = await _store.ListUntriedAsync(_driveOptions.Enabled, _youtubeOptions.Enabled, ct);
+            foreach (var row in rows)
+            {
+                if (_handled.TryGetValue(row.FilePath, out var at) && DateTime.UtcNow - at < HandledMemory)
+                    continue;
+                EnqueueFromRow(row, "nueva grabación del grabador");
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Pipeline: error recogiendo grabaciones nuevas.");
+        }
+    }
+
+    private void EnqueueFromRow(UploadPipeline row, string why)
+    {
+        if (!File.Exists(row.FilePath))
+        {
+            _logger.LogWarning("Pipeline: '{File}' ya no existe en disco; se omite.", row.FilePath);
+            return;
+        }
+
+        var rec = Recording.FromFile(row.ChannelName, row.FilePath);
+        _logger.LogInformation(
+            "Pipeline: {Why}: '{File}' (Drive={Drive}, YouTube={YouTube})",
+            why, rec.FileName, row.DriveStatus, row.YouTubeStatus);
+        Enqueue(rec);
     }
 
     /// <summary>Reencola las grabaciones con pasos pendientes o fallidos que aún tienen intentos disponibles.</summary>
@@ -136,20 +188,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
             var rows = await _store.ListIncompleteAsync(_driveOptions.Enabled, _youtubeOptions.Enabled, MaxAttempts, idleSince, ct);
 
             foreach (var row in rows)
-            {
-                if (!File.Exists(row.FilePath))
-                {
-                    _logger.LogWarning("Pipeline: '{File}' ya no existe en disco; se omite.", row.FilePath);
-                    continue;
-                }
-
-                var rec = Recording.FromFile(row.ChannelName, row.FilePath);
-
-                _logger.LogInformation(
-                    "Pipeline: retomando '{File}' (Drive={Drive}, YouTube={YouTube})",
-                    rec.FileName, row.DriveStatus, row.YouTubeStatus);
-                Enqueue(rec);
-            }
+                EnqueueFromRow(row, "retomando");
         }
         catch (OperationCanceledException) { }
         catch (Exception ex)
@@ -190,6 +229,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
         finally
         {
             job.CompletedAt = DateTime.UtcNow;
+            _handled[rec.FilePath] = DateTime.UtcNow;
             _activeByPath.TryRemove(rec.FilePath, out _);
         }
     }

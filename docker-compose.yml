@@ -1,4 +1,14 @@
-version: '3.8'
+# Sepius — arquitectura en tres contenedores:
+#
+#   sepius-api       API pública (login, chat, subidas a Drive/YouTube, HLS). Se puede reiniciar y
+#                    desplegar en cualquier momento: NO toca ninguna grabación.
+#   sepius-recorder  Grabador (ffmpeg/streamlink/yt-dlp + detección de directos). Solo es accesible desde
+#                    la red de Docker. Cambiarlo corta la grabación en curso (se cierra con limpieza).
+#   postgres         Base de datos. Es el punto de unión: el grabador apunta ahí lo que termina
+#                    (tabla upload_pipeline) y la API lo recoge y lo sube.
+#
+# Despliegue de la API (no corta grabaciones):   docker compose up -d --build sepius-api
+# Despliegue del grabador (esperar a que no haya directo):   docker compose up -d --build sepius-recorder
 
 services:
   postgres:
@@ -18,6 +28,49 @@ services:
       timeout: 5s
       retries: 5
 
+  sepius-recorder:
+    build:
+      context: .
+      dockerfile: src/Sepius.Recorder/Dockerfile
+    container_name: sepius-recorder
+    restart: unless-stopped
+    # Margen para que ffmpeg cierre el MP4 y se apunte la grabación antes de que Docker mate el contenedor
+    stop_grace_period: 90s
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # Sin "ports": solo se llega desde la red de Docker (http://sepius-recorder:9090)
+    expose:
+      - "9090"
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Production
+      - ASPNETCORE_URLS=http://+:9090
+      - TwitchApi__ClientId=${TWITCH_CLIENT_ID}
+      - TwitchApi__ClientSecret=${TWITCH_CLIENT_SECRET}
+      # Authorization Code Flow — user access token + refresh token para EventSub WebSocket
+      - TwitchApi__UserAccessToken=${TWITCH_USER_ACCESS_TOKEN:-}
+      - TwitchApi__RefreshToken=${TWITCH_REFRESH_TOKEN:-}
+      - TwitchApi__RedirectUri=${TWITCH_REDIRECT_URI:-http://localhost}
+      - Streamlink__OutputPath=/recordings
+      - Streamlink__TwitchCookiesPath=/run/secrets/sepius/twitch-cookies.txt
+      - Monitor__PollingIntervalSeconds=120
+      - Monitor__Channels__0=elttblue
+      - Monitor__Channels__1=kick:elttblue
+      # No subir grabaciones que duren menos de N minutos (anuncios, arranques fallidos). 0 = subir todo
+      - Pipeline__MinDurationMinutes=${PIPELINE_MIN_MINUTES:-5}
+      # Clave compartida con la API para la API interna del grabador
+      - Recorder__Key=${RECORDER_KEY:?define RECORDER_KEY en .env (openssl rand -base64 32)}
+      - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
+    volumes:
+      - recordings_data:/recordings
+      - ./secrets:/run/secrets/sepius:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:9090/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   sepius-api:
     build:
       context: .
@@ -33,21 +86,15 @@ services:
     environment:
       - ASPNETCORE_ENVIRONMENT=Production
       - ASPNETCORE_URLS=http://+:8080
-      - TwitchApi__ClientId=${TWITCH_CLIENT_ID}
-      - TwitchApi__ClientSecret=${TWITCH_CLIENT_SECRET}
-      # Authorization Code Flow — user access token + refresh token para EventSub WebSocket
-      - TwitchApi__UserAccessToken=${TWITCH_USER_ACCESS_TOKEN:-}
-      - TwitchApi__RefreshToken=${TWITCH_REFRESH_TOKEN:-}
-      - TwitchApi__RedirectUri=${TWITCH_REDIRECT_URI:-http://localhost}
+      # Ruta de las grabaciones (volumen compartido con el grabador): la API sirve el HLS y los .mp4
       - Streamlink__OutputPath=/recordings
-      - Streamlink__TwitchCookiesPath=/run/secrets/sepius/twitch-cookies.txt
-      - Monitor__PollingIntervalSeconds=120
-      - Monitor__Channels__0=elttblue
-      - Monitor__Channels__1=kick:elttblue
       - AllowedOrigins=${ALLOWED_ORIGINS:-http://localhost:4200}
       # Autenticación: ambas son obligatorias (la API no arranca sin ellas)
       - Auth__JwtKey=${JWT_KEY:?define JWT_KEY en .env (openssl rand -base64 48)}
       - Auth__AdminPassword=${ADMIN_PASSWORD:?define ADMIN_PASSWORD en .env (min. 12 caracteres)}
+      # Conexión con el grabador (red interna de Docker)
+      - Recorder__BaseUrl=http://sepius-recorder:9090
+      - Recorder__Key=${RECORDER_KEY:?define RECORDER_KEY en .env (openssl rand -base64 32)}
       - YouTube__Enabled=${YOUTUBE_ENABLED:-false}
       - YouTube__ClientId=${YOUTUBE_CLIENT_ID:-}
       - YouTube__ClientSecret=${YOUTUBE_CLIENT_SECRET:-}
@@ -59,12 +106,9 @@ services:
       - GoogleDrive__ClientSecret=${GOOGLE_DRIVE_CLIENT_SECRET:-}
       - GoogleDrive__RefreshToken=${GOOGLE_DRIVE_REFRESH_TOKEN:-}
       - GoogleDrive__RootFolderName=${GOOGLE_DRIVE_FOLDER:-Sepius}
-      # No subir grabaciones que duren menos de N minutos (anuncios, arranques fallidos). 0 = subir todo
-      - Pipeline__MinDurationMinutes=${PIPELINE_MIN_MINUTES:-5}
       - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
     volumes:
       - recordings_data:/recordings
-      - ./secrets:/run/secrets/sepius:ro
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/health || exit 1"]
       interval: 30s

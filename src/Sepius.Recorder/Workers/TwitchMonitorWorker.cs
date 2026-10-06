@@ -4,7 +4,7 @@ using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
 using Sepius.Infrastructure.Streamlink;
 
-namespace Sepius.API.Workers;
+namespace Sepius.Recorder.Workers;
 
 /// <summary>
 /// Worker que monitoriza periódicamente los canales de Twitch.

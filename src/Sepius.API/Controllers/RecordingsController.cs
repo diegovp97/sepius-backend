@@ -17,18 +17,18 @@ namespace Sepius.API.Controllers;
 [Authorize]
 public sealed class RecordingsController : ControllerBase
 {
-    private readonly IStreamlinkService _streamlink;
+    private readonly IRecorderClient _recorder;
     private readonly YouTubeUploadQueue _uploadQueue;
     private readonly UploadPipelineStore _pipeline;
     private readonly ILogger<RecordingsController> _logger;
 
     public RecordingsController(
-        IStreamlinkService streamlink,
+        IRecorderClient recorder,
         YouTubeUploadQueue uploadQueue,
         UploadPipelineStore pipeline,
         ILogger<RecordingsController> logger)
     {
-        _streamlink = streamlink;
+        _recorder = recorder;
         _uploadQueue = uploadQueue;
         _pipeline = pipeline;
         _logger = logger;
@@ -37,25 +37,46 @@ public sealed class RecordingsController : ControllerBase
     /// <summary>Devuelve las grabaciones en curso.</summary>
     [HttpGet("active")]
     [ProducesResponseType(typeof(IEnumerable<RecordingResponse>), StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<RecordingResponse>> GetActive()
-        => Ok(_streamlink.GetActiveRecordings().Select(ToResponse));
+    public async Task<ActionResult<IEnumerable<RecordingResponse>>> GetActive(CancellationToken ct)
+    {
+        var sessions = await _recorder.GetSessionsAsync(ct);
+        return Ok(sessions.Select(s => new RecordingResponse(
+            Guid.Empty, s.Channel, string.Empty, s.StartedAt.UtcDateTime, null, RecordingStatus.Recording, 0)));
+    }
 
     /// <summary>Devuelve el historial de grabaciones finalizadas.</summary>
     [HttpGet("completed")]
     [ProducesResponseType(typeof(IEnumerable<RecordingResponse>), StatusCodes.Status200OK)]
-    public ActionResult<IEnumerable<RecordingResponse>> GetCompleted()
-        => Ok(_streamlink.GetCompletedRecordings().Select(ToResponse));
+    public async Task<ActionResult<IEnumerable<RecordingResponse>>> GetCompleted(CancellationToken ct)
+    {
+        var rows = await _pipeline.ListRecentAsync(100, ct);
+        return Ok(rows.Select(r => new RecordingResponse(
+            Guid.Empty, r.ChannelName, Path.GetFileName(r.FilePath), r.CreatedAt, r.UpdatedAt,
+            RecordingStatus.Completed, r.FileSizeBytes)));
+    }
 
     /// <summary>Detiene manualmente la grabación de un canal.</summary>
     [HttpDelete("{channelName}")]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> Stop(string channelName)
+    [ProducesResponseType(StatusCodes.Status503ServiceUnavailable)]
+    public async Task<IActionResult> Stop(string channelName, CancellationToken ct)
     {
-        if (!_streamlink.IsRecording(channelName))
+        var active = (await _recorder.GetSessionsAsync(ct))
+            .Where(s => s.Channel.Equals(channelName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        if (active.Count == 0)
             return NotFound($"No hay grabación activa para '{channelName}'.");
 
-        await _streamlink.StopRecordingAsync(channelName);
+        try
+        {
+            foreach (var s in active)
+                await _recorder.StopAsync(s.Channel, s.Platform, ct);
+        }
+        catch (HttpRequestException)
+        {
+            return StatusCode(StatusCodes.Status503ServiceUnavailable, new { error = "El grabador no responde." });
+        }
         return NoContent();
     }
 

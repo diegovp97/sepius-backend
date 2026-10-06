@@ -1,3 +1,4 @@
+using Sepius.Application.DTOs;
 using Sepius.Domain.Entities;
 
 namespace Sepius.Application.Interfaces;
@@ -18,6 +19,15 @@ public interface ILiveTranscodeService
 
     Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default);
     Task StopAsync(string channelName, string platform = "twitch");
+
+    /// <summary>Sesiones de grabación en curso (arrancando o grabando).</summary>
+    IReadOnlyList<LiveSessionDto> GetActiveSessions();
+
+    /// <summary>
+    /// Para todas las sesiones con cierre limpio (SIGINT a ffmpeg, MP4 finalizado) y espera hasta
+    /// <paramref name="timeout"/> a que terminen. Se usa al apagar el grabador.
+    /// </summary>
+    Task StopAllAsync(TimeSpan timeout);
 
     /// <summary>
     /// Se dispara cuando la grabación MP4 integrada termina (post-stream).

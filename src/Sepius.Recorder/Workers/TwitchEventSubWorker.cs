@@ -5,7 +5,7 @@ using Microsoft.Extensions.Options;
 using Sepius.Application.Interfaces;
 using Sepius.Infrastructure.TwitchApi;
 
-namespace Sepius.API.Workers;
+namespace Sepius.Recorder.Workers;
 
 /// <summary>
 /// Mantiene una conexión WebSocket persistente a Twitch EventSub.
