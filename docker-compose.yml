@@ -59,6 +59,8 @@ services:
       - GoogleDrive__ClientSecret=${GOOGLE_DRIVE_CLIENT_SECRET:-}
       - GoogleDrive__RefreshToken=${GOOGLE_DRIVE_REFRESH_TOKEN:-}
       - GoogleDrive__RootFolderName=${GOOGLE_DRIVE_FOLDER:-Sepius}
+      # No subir grabaciones que duren menos de N minutos (anuncios, arranques fallidos). 0 = subir todo
+      - Pipeline__MinDurationMinutes=${PIPELINE_MIN_MINUTES:-5}
       - ConnectionStrings__Postgres=Host=postgres;Port=5432;Database=sepius;Username=sepius;Password=${POSTGRES_PASSWORD:-sepius_dev}
     volumes:
       - recordings_data:/recordings

@@ -28,6 +28,9 @@ public sealed class Recording
     // Propiedad calculada: no se almacena, se deriva de FilePath
     public string FileName => Path.GetFileName(FilePath);
 
+    /// <summary>Duración de la sesión (hasta ahora si aún no ha terminado).</summary>
+    public TimeSpan Duration => (EndedAt ?? DateTime.UtcNow) - StartedAt;
+
     /// <summary>
     /// Reconstruye una grabación ya terminada a partir de su fichero (subidas manuales y recuperación
     /// tras un reinicio). La hora de inicio sale del nombre (<c>yyyyMMdd_HHmmss</c>, UTC); sin ella,

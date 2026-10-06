@@ -209,11 +209,24 @@ app.MapControllers();
     var liveTranscode = app.Services.GetRequiredService<ILiveTranscodeService>();
     var uploadQueue = app.Services.GetRequiredService<YouTubeUploadQueue>();
 
+    // Las grabaciones muy cortas (p. ej. el clip de anuncio de Twitch de ~16 s o un arranque fallido)
+    // no se suben a Drive ni a YouTube. Configurable con Pipeline__MinDurationMinutes (0 = subir todo).
+    var minDuration = TimeSpan.FromMinutes(Math.Max(0, app.Configuration.GetValue<int?>("Pipeline:MinDurationMinutes") ?? 5));
+
     liveTranscode.RecordingCompleted += (recording) =>
     {
         var logger = app.Services.GetRequiredService<ILogger<Program>>();
+
+        if (recording.Duration < minDuration)
+        {
+            logger.LogWarning(
+                "Grabación de '{Channel}' demasiado corta ({Seconds:F0} s < {Min} min): no se sube. Fichero: {File}",
+                recording.ChannelName, recording.Duration.TotalSeconds, minDuration.TotalMinutes, recording.FileName);
+            return Task.CompletedTask;
+        }
+
         logger.LogInformation(
-            "Grabación completada para '{Channel}'. Encolando subida a YouTube...",
+            "Grabación completada para '{Channel}'. Encolando subida (Drive → YouTube)...",
             recording.ChannelName);
         uploadQueue.Enqueue(recording);
         return Task.CompletedTask;

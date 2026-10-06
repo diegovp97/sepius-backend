@@ -421,10 +421,10 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                     "[Transcode] Grabación MP4 completada: {Path} ({Size:N0} bytes)",
                     mp4Path, finalInfo.Length);
 
-                var recording = Recording.Create(channelName, mp4Path);
+                // FromFile toma el inicio real del nombre del fichero (yyyyMMdd_HHmmss, UTC). Con Create()
+                // StartedAt valdría "ahora" (el final del directo): duración ≈ 0 y título con la hora de fin.
+                var recording = Recording.FromFile(channelName, mp4Path);
                 recording.EndedAt = DateTime.UtcNow;
-                recording.Status = RecordingStatus.Completed;
-                recording.FileSizeBytes = finalInfo.Length;
 
                 FireRecordingCompleted(recording);
             }
