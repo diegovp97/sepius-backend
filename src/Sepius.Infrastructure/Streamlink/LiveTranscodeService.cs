@@ -270,13 +270,23 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         var additionalArgs = string.IsNullOrWhiteSpace(_options.AdditionalArgs) ? string.Empty : $" {_options.AdditionalArgs.Trim()}";
         var hasVideo = $"timeout 30 {ShellQuote(_options.ExecutablePath)}{additionalArgs} --json {ShellQuote(streamUrl)} 2>/dev/null | grep -qE '\"[0-9]+p[0-9]*'";
 
+        // Al empezar un directo, Twitch tarda unos segundos en ofrecer vídeo (primero solo audio o el anuncio
+        // inicial). Si se decide de golpe, yt-dlp se queda con el clip del anuncio ("Commercial break in
+        // progress", ~16 s, que además termina). Por eso se espera a que Streamlink vea vídeo antes de caer a yt-dlp.
+        const int attempts = 18; // 18 × ~5 s ≈ 90 s
         return string.Join("\n",
             "#!/bin/bash",
-            $"if {hasVideo}; then",
+            "ok=0",
+            $"for i in $(seq 1 {attempts}); do",
+            $"  if {hasVideo}; then ok=1; break; fi",
+            $"  echo \"[Transcode] Streamlink aún sin vídeo (intento $i/{attempts}); espero 5 s…\" >&2",
+            "  sleep 5",
+            "done",
+            "if [ \"$ok\" = 1 ]; then",
             "  echo \"[Transcode] Streamlink ofrece vídeo; usando copia directa.\" >&2",
             Body(BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path)),
             "else",
-            "  echo \"[Transcode] Streamlink sin vídeo; usando yt-dlp.\" >&2",
+            "  echo \"[Transcode] Streamlink sin vídeo tras esperar; usando yt-dlp.\" >&2",
             Body(BuildYtDlpScript(streamUrl, segPattern, m3u8Path, mp4Path)),
             "fi");
     }
