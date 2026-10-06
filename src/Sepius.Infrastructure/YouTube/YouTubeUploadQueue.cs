@@ -143,10 +143,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
                     continue;
                 }
 
-                var rec = Recording.Create(row.ChannelName, row.FilePath);
-                rec.Status = RecordingStatus.Completed;
-                rec.EndedAt = File.GetLastWriteTimeUtc(row.FilePath);
-                rec.FileSizeBytes = new FileInfo(row.FilePath).Length;
+                var rec = Recording.FromFile(row.ChannelName, row.FilePath);
 
                 _logger.LogInformation(
                     "Pipeline: retomando '{File}' (Drive={Drive}, YouTube={YouTube})",

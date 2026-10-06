@@ -28,6 +28,34 @@ public sealed class Recording
     // Propiedad calculada: no se almacena, se deriva de FilePath
     public string FileName => Path.GetFileName(FilePath);
 
+    /// <summary>
+    /// Reconstruye una grabación ya terminada a partir de su fichero (subidas manuales y recuperación
+    /// tras un reinicio). La hora de inicio sale del nombre (<c>yyyyMMdd_HHmmss</c>, UTC); sin ella,
+    /// de la fecha de modificación. Así el título de YouTube refleja cuándo fue el directo.
+    /// </summary>
+    public static Recording FromFile(string channelName, string filePath)
+    {
+        var info = new FileInfo(filePath);
+        var started = DateTime.TryParseExact(
+            Path.GetFileNameWithoutExtension(filePath), "yyyyMMdd_HHmmss",
+            System.Globalization.CultureInfo.InvariantCulture,
+            System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+            out var parsed)
+            ? parsed
+            : info.LastWriteTimeUtc;
+
+        return new Recording
+        {
+            Id = Guid.NewGuid(),
+            ChannelName = channelName,
+            FilePath = filePath,
+            StartedAt = started,
+            EndedAt = info.LastWriteTimeUtc,
+            Status = RecordingStatus.Completed,
+            FileSizeBytes = info.Length
+        };
+    }
+
     public static Recording Create(string channelName, string filePath) => new()
     {
         Id = Guid.NewGuid(),

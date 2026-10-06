@@ -78,11 +78,7 @@ public sealed class RecordingsController : ControllerBase
         if (!System.IO.File.Exists(filePath))
             return NotFound($"Archivo no encontrado: {filePath}");
 
-        var fileInfo = new FileInfo(filePath);
-        var recording = Recording.Create(channelName, filePath);
-        recording.Status = RecordingStatus.Completed;
-        recording.EndedAt = fileInfo.LastWriteTimeUtc;
-        recording.FileSizeBytes = fileInfo.Length;
+        var recording = Recording.FromFile(channelName, filePath);
 
         _logger.LogInformation("Upload encolado para '{File}'", filePath);
         var job = _uploadQueue.Enqueue(recording, force: true);
