@@ -7,7 +7,9 @@
   y lo cambia por un refresh token. El token se copia al portapapeles (no se imprime ni se guarda en
   ningún fichero; con -ShowToken se muestra). Pégalo en el .env de la VPS como GOOGLE_DRIVE_REFRESH_TOKEN.
 
-  Requisitos en Google Cloud Console (el mismo proyecto que usa YouTube):
+  Uso:  -Service drive (por defecto)  |  -Service youtube
+
+  Requisitos en Google Cloud Console:
     1. APIs y servicios > Biblioteca > "Google Drive API" > Habilitar.
     2. Pantalla de consentimiento OAuth > añadir el scope ".../auth/drive.file"
        y poner la app en "En producción" (si se queda en "Pruebas" el token caduca a los 7 días).
@@ -22,7 +24,9 @@ param(
     [string]$ClientId,
     [string]$ClientSecret,
     [int]$Port = 8765,
-    [switch]$ShowToken
+    [switch]$ShowToken,
+    # Qué servicio autorizar: 'drive' (copias de seguridad) o 'youtube' (subir/listar/borrar vídeos)
+    [ValidateSet('drive', 'youtube')][string]$Service = 'drive'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,7 +50,7 @@ if (-not $ClientSecret) {
 }
 
 $redirect = "http://127.0.0.1:$Port/"
-$scope = 'https://www.googleapis.com/auth/drive.file'
+$scope = if ($Service -eq 'youtube') { 'https://www.googleapis.com/auth/youtube.force-ssl' } else { 'https://www.googleapis.com/auth/drive.file' }
 $state = [guid]::NewGuid().ToString('N')
 
 $authUrl = 'https://accounts.google.com/o/oauth2/v2/auth' +
@@ -63,7 +67,12 @@ $listener.Prefixes.Add($redirect)
 $listener.Start()
 
 Write-Host ''
-Write-Host 'Se abre el navegador. Inicia sesión con la cuenta de Google donde quieres guardar las copias.' -ForegroundColor Yellow
+if ($Service -eq 'youtube') {
+    Write-Host 'Se abre el navegador. Inicia sesión con la cuenta de Google DUEÑA DEL CANAL DE YOUTUBE donde se publicarán los vídeos.' -ForegroundColor Yellow
+}
+else {
+    Write-Host 'Se abre el navegador. Inicia sesión con la cuenta de Google donde quieres guardar las copias.' -ForegroundColor Yellow
+}
 Write-Host "(Si no se abre, copia esta URL):`n$authUrl`n"
 Start-Process $authUrl
 
@@ -116,11 +125,20 @@ else {
     Write-Host 'Pégalo directamente donde lo necesites (Ctrl+V). Usa -ShowToken solo si quieres verlo en pantalla.' -ForegroundColor DarkGray
 }
 Write-Host ''
-Write-Host 'Siguiente paso: añade estas líneas al .env de la VPS (/opt/sepius/sepius-backend/.env):' -ForegroundColor Yellow
-Write-Host '  GOOGLE_DRIVE_ENABLED=true'
-Write-Host '  GOOGLE_DRIVE_REFRESH_TOKEN=<el token de arriba>'
-Write-Host "  GOOGLE_DRIVE_CLIENT_ID=$ClientId"
-Write-Host '  GOOGLE_DRIVE_CLIENT_SECRET=<el client_secret de tu JSON>'
+if ($Service -eq 'youtube') {
+    Write-Host 'Siguiente paso: pon estas variables en el .env de la VPS (/opt/sepius/sepius-backend/.env):' -ForegroundColor Yellow
+    Write-Host '  YOUTUBE_ENABLED=true'
+    Write-Host '  YOUTUBE_REFRESH_TOKEN=<el token del portapapeles>'
+    Write-Host "  YOUTUBE_CLIENT_ID=$ClientId"
+    Write-Host '  YOUTUBE_CLIENT_SECRET=<el client_secret de tu JSON>'
+}
+else {
+    Write-Host 'Siguiente paso: añade estas líneas al .env de la VPS (/opt/sepius/sepius-backend/.env):' -ForegroundColor Yellow
+    Write-Host '  GOOGLE_DRIVE_ENABLED=true'
+    Write-Host '  GOOGLE_DRIVE_REFRESH_TOKEN=<el token del portapapeles>'
+    Write-Host "  GOOGLE_DRIVE_CLIENT_ID=$ClientId"
+    Write-Host '  GOOGLE_DRIVE_CLIENT_SECRET=<el client_secret de tu JSON>'
+}
 Write-Host ''
-Write-Host 'El refresh token solo funciona con el cliente OAuth que lo emitió, así que el CLIENT_ID y el' -ForegroundColor DarkGray
-Write-Host 'CLIENT_SECRET deben ser los de este mismo JSON (no los de YouTube si son de otro proyecto).' -ForegroundColor DarkGray
+Write-Host 'El refresh token solo funciona con el cliente OAuth que lo emitió: el CLIENT_ID y el CLIENT_SECRET' -ForegroundColor DarkGray
+Write-Host 'deben ser los de este mismo JSON.' -ForegroundColor DarkGray
