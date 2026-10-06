@@ -4,8 +4,8 @@
 
 .DESCRIPTION
   Abre el navegador para que autorices la app, recibe el código en http://127.0.0.1:<puerto>/
-  y lo cambia por un refresh token. El token se muestra SOLO en esta consola: no se guarda en
-  ningún fichero. Cópialo al .env de la VPS como GOOGLE_DRIVE_REFRESH_TOKEN.
+  y lo cambia por un refresh token. El token se copia al portapapeles (no se imprime ni se guarda en
+  ningún fichero; con -ShowToken se muestra). Pégalo en el .env de la VPS como GOOGLE_DRIVE_REFRESH_TOKEN.
 
   Requisitos en Google Cloud Console (el mismo proyecto que usa YouTube):
     1. APIs y servicios > Biblioteca > "Google Drive API" > Habilitar.
@@ -21,7 +21,8 @@ param(
     [string]$ClientJson,
     [string]$ClientId,
     [string]$ClientSecret,
-    [int]$Port = 8765
+    [int]$Port = 8765,
+    [switch]$ShowToken
 )
 
 $ErrorActionPreference = 'Stop'
@@ -104,8 +105,16 @@ if (-not $tokens.refresh_token) {
 Write-Host ''
 Write-Host "Scope concedido: $($tokens.scope)" -ForegroundColor Green
 Write-Host ''
-Write-Host 'REFRESH TOKEN (cópialo ahora; no se guarda en ningún sitio):' -ForegroundColor Cyan
-Write-Host $tokens.refresh_token
+if ($ShowToken) {
+    Write-Host 'REFRESH TOKEN (cópialo ahora; no se guarda en ningún fichero):' -ForegroundColor Cyan
+    Write-Host $tokens.refresh_token
+}
+else {
+    # Por defecto NO se imprime: así no acaba en capturas, logs ni chats. Está en el portapapeles.
+    Set-Clipboard -Value $tokens.refresh_token
+    Write-Host 'El REFRESH TOKEN está copiado en el portapapeles (no se muestra ni se guarda en ningún fichero).' -ForegroundColor Cyan
+    Write-Host 'Pégalo directamente donde lo necesites (Ctrl+V). Usa -ShowToken solo si quieres verlo en pantalla.' -ForegroundColor DarkGray
+}
 Write-Host ''
 Write-Host 'Siguiente paso: añade estas líneas al .env de la VPS (/opt/sepius/sepius-backend/.env):' -ForegroundColor Yellow
 Write-Host '  GOOGLE_DRIVE_ENABLED=true'

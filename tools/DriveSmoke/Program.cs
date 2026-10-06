@@ -2,10 +2,9 @@
 // el pipeline, comprueba que es idempotente y lo borra. Las credenciales salen de variables de
 // entorno de TU sesión; nunca se escriben en disco ni se imprimen.
 //
-//   $env:GOOGLE_DRIVE_REFRESH_TOKEN = '...'
-//   $env:GOOGLE_DRIVE_CLIENT_ID     = '...'   # opcional: si falta se usa YOUTUBE_CLIENT_ID
-//   $env:GOOGLE_DRIVE_CLIENT_SECRET = '...'   # opcional: si falta se usa YOUTUBE_CLIENT_SECRET
-//   dotnet run --project tools/DriveSmoke -- --size-mb 40        (3 trozos de 16 MB)
+//   (el refresh token se pide al ejecutar, sin mostrarse; o GOOGLE_DRIVE_REFRESH_TOKEN en el entorno)
+//   dotnet run --project tools/DriveSmoke -- --client-json "$env:USERPROFILE\Downloads\client_secret_*.json" --size-mb 40
+//   (o, en vez de --client-json: $env:GOOGLE_DRIVE_CLIENT_ID / GOOGLE_DRIVE_CLIENT_SECRET)
 //   dotnet run --project tools/DriveSmoke -- --keep              (no borra el fichero al terminar)
 
 using System.Diagnostics;
@@ -20,17 +19,43 @@ using Sepius.Infrastructure.YouTube;
 static string Env(string name, string fallback = "") =>
     Environment.GetEnvironmentVariable(name) is { Length: > 0 } v ? v : fallback;
 
+// --client-json <ruta>: lee client_id/client_secret del JSON descargado de Google Cloud
+string jsonId = "", jsonSecret = "";
+if (args.Contains("--client-json"))
+{
+    var pattern = args[Array.IndexOf(args, "--client-json") + 1];
+    var dir = Path.GetDirectoryName(pattern);
+    var file = new DirectoryInfo(string.IsNullOrEmpty(dir) ? "." : dir)
+        .GetFiles(Path.GetFileName(pattern)).OrderByDescending(f => f.LastWriteTimeUtc).FirstOrDefault();
+    if (file is null) { Console.Error.WriteLine($"No se encontró {pattern}"); return 2; }
+    var root = JsonDocument.Parse(File.ReadAllText(file.FullName)).RootElement;
+    var section = root.TryGetProperty("installed", out var i) ? i : root.GetProperty("web");
+    jsonId = section.GetProperty("client_id").GetString() ?? "";
+    jsonSecret = section.GetProperty("client_secret").GetString() ?? "";
+}
+
 var sizeMb = args.Contains("--size-mb") ? int.Parse(args[Array.IndexOf(args, "--size-mb") + 1]) : 40;
 var keep = args.Contains("--keep");
 
 var options = new GoogleDriveOptions
 {
     Enabled = true,
-    ClientId = Env("GOOGLE_DRIVE_CLIENT_ID", Env("YOUTUBE_CLIENT_ID")),
-    ClientSecret = Env("GOOGLE_DRIVE_CLIENT_SECRET", Env("YOUTUBE_CLIENT_SECRET")),
+    ClientId = jsonId.Length > 0 ? jsonId : Env("GOOGLE_DRIVE_CLIENT_ID", Env("YOUTUBE_CLIENT_ID")),
+    ClientSecret = jsonSecret.Length > 0 ? jsonSecret : Env("GOOGLE_DRIVE_CLIENT_SECRET", Env("YOUTUBE_CLIENT_SECRET")),
     RefreshToken = Env("GOOGLE_DRIVE_REFRESH_TOKEN"),
     RootFolderName = Env("GOOGLE_DRIVE_FOLDER", "Sepius"),
 };
+
+if (options.RefreshToken.Length == 0 && !Console.IsInputRedirected)
+{
+    // Sin la variable de entorno: se pide aquí, sin mostrar lo que pegas.
+    Console.Write("Pega el refresh token (no se verá en pantalla) y pulsa Enter: ");
+    var sb = new System.Text.StringBuilder();
+    for (ConsoleKeyInfo k; (k = Console.ReadKey(intercept: true)).Key != ConsoleKey.Enter;)
+        if (k.Key == ConsoleKey.Backspace) { if (sb.Length > 0) sb.Length--; } else sb.Append(k.KeyChar);
+    Console.WriteLine();
+    options.RefreshToken = sb.ToString().Trim();
+}
 
 if (options.RefreshToken.Length == 0 || options.ClientId.Length == 0 || options.ClientSecret.Length == 0)
 {
