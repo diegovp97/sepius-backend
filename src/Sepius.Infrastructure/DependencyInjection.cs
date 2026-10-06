@@ -9,6 +9,8 @@ using Sepius.Application.Interfaces;
 using Sepius.Infrastructure.Persistence;
 using Sepius.Infrastructure.Streamlink;
 using Sepius.Infrastructure.TwitchApi;
+using Sepius.Infrastructure.Drive;
+using Sepius.Infrastructure.Pipeline;
 using Sepius.Infrastructure.YouTube;
 using Sepius.Infrastructure.Services;
 
@@ -77,6 +79,16 @@ public static class DependencyInjection
         });
 
         // Cola de subidas a YouTube — BackgroundService que procesa encolados
+        // Copia de seguridad en Google Drive (desactivada por defecto: GoogleDrive__Enabled)
+        services.Configure<GoogleDriveOptions>(configuration.GetSection(GoogleDriveOptions.SectionName));
+        services.AddHttpClient<IDriveUploadService, GoogleDriveService>(client =>
+        {
+            client.Timeout = TimeSpan.FromHours(6);
+        });
+
+        // Estado persistente del pipeline (Drive → YouTube) en Postgres
+        services.AddSingleton<UploadPipelineStore>();
+
         services.AddSingleton<YouTubeUploadQueue>();
         services.AddHostedService(sp => sp.GetRequiredService<YouTubeUploadQueue>());
 

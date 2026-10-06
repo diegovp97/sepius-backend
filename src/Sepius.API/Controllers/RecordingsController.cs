@@ -3,6 +3,7 @@ using Microsoft.AspNetCore.Mvc;
 using Sepius.Application.DTOs;
 using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
+using Sepius.Infrastructure.Pipeline;
 using Sepius.Infrastructure.YouTube;
 
 namespace Sepius.API.Controllers;
@@ -18,15 +19,18 @@ public sealed class RecordingsController : ControllerBase
 {
     private readonly IStreamlinkService _streamlink;
     private readonly YouTubeUploadQueue _uploadQueue;
+    private readonly UploadPipelineStore _pipeline;
     private readonly ILogger<RecordingsController> _logger;
 
     public RecordingsController(
         IStreamlinkService streamlink,
         YouTubeUploadQueue uploadQueue,
+        UploadPipelineStore pipeline,
         ILogger<RecordingsController> logger)
     {
         _streamlink = streamlink;
         _uploadQueue = uploadQueue;
+        _pipeline = pipeline;
         _logger = logger;
     }
 
@@ -81,7 +85,7 @@ public sealed class RecordingsController : ControllerBase
         recording.FileSizeBytes = fileInfo.Length;
 
         _logger.LogInformation("Upload encolado para '{File}'", filePath);
-        var job = _uploadQueue.Enqueue(recording);
+        var job = _uploadQueue.Enqueue(recording, force: true);
 
         return Accepted(new
         {
@@ -107,6 +111,9 @@ public sealed class RecordingsController : ControllerBase
             fileName = job.Recording.FileName,
             videoId = job.VideoId,
             error = job.Error,
+            driveStatus = job.DriveStatus,
+            driveFileId = job.DriveFileId,
+            driveError = job.DriveError,
             queuedAt = job.QueuedAt,
             startedAt = job.StartedAt,
             completedAt = job.CompletedAt
@@ -125,11 +132,32 @@ public sealed class RecordingsController : ControllerBase
             fileName = j.Recording.FileName,
             videoId = j.VideoId,
             error = j.Error,
+            driveStatus = j.DriveStatus,
+            driveFileId = j.DriveFileId,
+            driveError = j.DriveError,
             queuedAt = j.QueuedAt,
             startedAt = j.StartedAt,
             completedAt = j.CompletedAt
         });
         return Ok(jobs);
+    }
+
+    /// <summary>Estado persistente del pipeline (Drive → YouTube) de las últimas grabaciones.</summary>
+    [HttpGet("pipeline")]
+    [ProducesResponseType(typeof(IEnumerable<object>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> Pipeline([FromQuery] int take = 50, CancellationToken ct = default)
+    {
+        var rows = await _pipeline.ListRecentAsync(Math.Clamp(take, 1, 200), ct);
+        return Ok(rows.Select(r => new
+        {
+            fileName = Path.GetFileName(r.FilePath),
+            channelName = r.ChannelName,
+            sizeBytes = r.FileSizeBytes,
+            drive = new { status = r.DriveStatus.ToString(), fileId = r.DriveFileId, error = r.DriveError, attempts = r.DriveAttempts },
+            youtube = new { status = r.YouTubeStatus.ToString(), videoId = r.YouTubeVideoId, error = r.YouTubeError, attempts = r.YouTubeAttempts },
+            createdAt = r.CreatedAt,
+            updatedAt = r.UpdatedAt
+        }));
     }
 
     /// <summary>Lista las grabaciones MP4 en el directorio de recordings.</summary>
