@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
   Obtiene el refresh token de Google Drive (scope drive.file) para el pipeline de Sepius.
 
@@ -15,15 +15,26 @@
        añade http://127.0.0.1:8765/ como URI de redirección autorizado.
 
 .EXAMPLE
-  .\scripts\get-google-drive-token.ps1
+  .\scripts\get-google-drive-token.ps1 -ClientJson "$env:USERPROFILE\Downloads\client_secret_*.json"
 #>
 param(
+    [string]$ClientJson,
     [string]$ClientId,
     [string]$ClientSecret,
     [int]$Port = 8765
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Si pasas el JSON que descargas de Google Cloud (client_secret_*.json), se leen de ahí el ID y el secreto.
+if ($ClientJson) {
+    $file = Get-ChildItem -Path $ClientJson -ErrorAction Stop | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    $json = Get-Content -Raw -Path $file.FullName | ConvertFrom-Json
+    $cfg = if ($json.installed) { $json.installed } elseif ($json.web) { $json.web } else { throw 'El JSON no tiene la sección "installed" ni "web".' }
+    $ClientId = $cfg.client_id
+    $ClientSecret = $cfg.client_secret
+    Write-Host "Credenciales leídas de $($file.Name)" -ForegroundColor DarkGray
+}
 
 if (-not $ClientId) { $ClientId = Read-Host 'Client ID (el de tu proyecto de Google Cloud)' }
 if (-not $ClientSecret) {
@@ -99,4 +110,8 @@ Write-Host ''
 Write-Host 'Siguiente paso: añade estas líneas al .env de la VPS (/opt/sepius/sepius-backend/.env):' -ForegroundColor Yellow
 Write-Host '  GOOGLE_DRIVE_ENABLED=true'
 Write-Host '  GOOGLE_DRIVE_REFRESH_TOKEN=<el token de arriba>'
-Write-Host '(El Client ID/Secret se reutilizan de YouTube si no defines GOOGLE_DRIVE_CLIENT_ID/SECRET.)'
+Write-Host "  GOOGLE_DRIVE_CLIENT_ID=$ClientId"
+Write-Host '  GOOGLE_DRIVE_CLIENT_SECRET=<el client_secret de tu JSON>'
+Write-Host ''
+Write-Host 'El refresh token solo funciona con el cliente OAuth que lo emitió, así que el CLIENT_ID y el' -ForegroundColor DarkGray
+Write-Host 'CLIENT_SECRET deben ser los de este mismo JSON (no los de YouTube si son de otro proyecto).' -ForegroundColor DarkGray
