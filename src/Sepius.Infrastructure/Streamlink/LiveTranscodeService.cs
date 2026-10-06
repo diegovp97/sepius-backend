@@ -425,7 +425,20 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     // ── Limpieza ───────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Limpieza de una sesión terminada (faststart + notificar). Cuenta como trabajo pendiente desde la
+    /// primera línea: StopAllAsync espera a que llegue a cero, y así el apagado no corta el faststart ni
+    /// deja la grabación sin apuntar. FireRecordingCompleted incrementa su propio contador antes de que este
+    /// decremente, de modo que no hay hueco en el que parezca que todo ha terminado.
+    /// </summary>
     private async Task CleanupAsync(string key, string platform, string channelName, string mp4Path)
+    {
+        Interlocked.Increment(ref _pendingHandlers);
+        try { await CleanupCoreAsync(key, platform, channelName, mp4Path).ConfigureAwait(false); }
+        finally { Interlocked.Decrement(ref _pendingHandlers); }
+    }
+
+    private async Task CleanupCoreAsync(string key, string platform, string channelName, string mp4Path)
     {
         if (!_active.TryRemove(key, out var session))
             return;
