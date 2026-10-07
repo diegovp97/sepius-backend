@@ -56,8 +56,14 @@ public sealed class TwitchEventSubWorker : BackgroundService
             try
             {
                 await RunSessionAsync(WssEndpoint, stoppingToken);
-                // Si RunSessionAsync sale limpiamente (shutdown), salir del loop
-                break;
+                if (stoppingToken.IsCancellationRequested) break;
+
+                // Una sesión que acaba sin excepción (Close del servidor, reconexión rechazada con
+                // "invalid reconnect attempt"...) NO es un apagado: hay que abrir una sesión nueva
+                // y volver a suscribirse, o nos quedamos sin stream.online hasta reiniciar el contenedor.
+                _logger.LogWarning("Sesión EventSub terminada. Abriendo una nueva en 5s...");
+                await Task.Delay(TimeSpan.FromSeconds(5), stoppingToken);
+                backoffSeconds = 2;
             }
             catch (OperationCanceledException)
             {
