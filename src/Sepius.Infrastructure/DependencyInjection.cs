@@ -172,6 +172,11 @@ public static class DependencyInjection
                 ctx.Context.Response.Headers["Cache-Control"] = "no-cache, no-store, must-revalidate";
                 ctx.Context.Response.Headers["Pragma"]        = "no-cache";
                 ctx.Context.Response.Headers["Expires"]       = "0";
+
+                // El HLS es público: el receptor de Chromecast lo pide desde otro origen (gstatic) y exige CORS.
+                // Si UseCors ya puso su cabecera (origen permitido, con credenciales) no se toca.
+                if (!ctx.Context.Response.Headers.ContainsKey("Access-Control-Allow-Origin"))
+                    ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*";
             }
         });
 
