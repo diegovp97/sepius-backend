@@ -261,6 +261,10 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         string mp4Path)
     {
         var quality = string.IsNullOrWhiteSpace(_options.Quality) ? "best" : _options.Quality.Trim();
+        // Si el canal emite una sola calidad con nombre atípico (p. ej. "1280p"), "best" no la encuentra
+        // ("The specified stream(s) 'best' could not be found") y ffmpeg recibe una tubería vacía.
+        // best-unfiltered sí la incluye; Streamlink prueba la lista separada por comas en orden.
+        if (quality == "best") quality = "best,best-unfiltered";
         var additionalArgs = string.IsNullOrWhiteSpace(_options.AdditionalArgs) ? string.Empty : $" {_options.AdditionalArgs.Trim()}";
         var slLogPath = $"/tmp/sl_{sessionId}.log";
 
