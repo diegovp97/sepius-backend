@@ -99,6 +99,13 @@ public sealed class TwitchMonitorWorker : BackgroundService
             .Where(c => c.IsMonitored && c.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
+        var starviosChannels = channels
+            .Where(c => c.IsMonitored && c.Name.StartsWith("starvios:", StringComparison.OrdinalIgnoreCase))
+            .ToList();
+
+        if (starviosChannels.Count > 0)
+            await CheckStarviosAsync(starviosChannels, liveTranscode, ct);
+
         if (kickChannels.Count == 0)
         {
             _logger.LogDebug("No hay canales Kick monitorizados.");
@@ -134,6 +141,61 @@ public sealed class TwitchMonitorWorker : BackgroundService
             catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogError(ex, "Error verificando canal Kick '{Channel}'", channel.Name);
+            }
+        }
+    }
+
+    private const string StarviosLiveNowUrl = "https://starvios.com/api/public/live-now?top=500";
+
+    /// <summary>
+    /// Starvios no tiene plugin de streamlink: se consulta su API pública de directos
+    /// y se retransmite el HLS de Mux (stream.mux.com/{playback_id}.m3u8) vía ffmpeg.
+    /// </summary>
+    private async Task CheckStarviosAsync(
+        List<Sepius.Domain.Entities.Channel> channels,
+        ILiveTranscodeService liveTranscode,
+        CancellationToken ct)
+    {
+        Dictionary<string, string> live;   // username → playback_id
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(20) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; SepiusMonitor)");
+            using var doc = System.Text.Json.JsonDocument.Parse(
+                await http.GetStringAsync(StarviosLiveNowUrl, ct));
+
+            live = new(StringComparer.OrdinalIgnoreCase);
+            foreach (var row in doc.RootElement.GetProperty("rows").EnumerateArray())
+            {
+                if (row.TryGetProperty("status", out var st) && st.GetString() != "live") continue;
+                if (!row.TryGetProperty("playback_id", out var pb) || pb.GetString() is not { Length: > 0 } playback) continue;
+                if (!row.TryGetProperty("profiles", out var prof) ||
+                    !prof.TryGetProperty("username", out var un) || un.GetString() is not { } username) continue;
+                live[username] = playback;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
+        {
+            // Estado desconocido: no tocar las sesiones activas.
+            _logger.LogWarning(ex, "Starvios: no se pudo consultar live-now. Estado mantenido.");
+            return;
+        }
+
+        foreach (var channel in channels)
+        {
+            var slug = channel.Name["starvios:".Length..];
+            var isTranscoding = liveTranscode.IsTranscoding(slug, "starvios");
+
+            if (live.TryGetValue(slug, out var playbackId))
+            {
+                if (isTranscoding) continue;
+                _logger.LogInformation("'{Channel}' está en DIRECTO (Starvios). Iniciando HLS.", channel.Name);
+                await liveTranscode.StartAsync(slug, "starvios", ct, $"https://stream.mux.com/{playbackId}.m3u8");
+            }
+            else if (isTranscoding)
+            {
+                _logger.LogInformation("'{Channel}' ha terminado el directo (Starvios). Deteniendo HLS.", channel.Name);
+                await liveTranscode.StopAsync(slug, "starvios");
             }
         }
     }

@@ -73,13 +73,16 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
     // ── Inicio ─────────────────────────────────────────────────────────────
 
-    public Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default)
+    public Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default, string? sourceUrl = null)
     {
         platform    = NormalizePlatform(platform);
         channelName = Normalize(channelName);
 
         if (!ValidChannelName.IsMatch(channelName))
             throw new ArgumentException($"Nombre de canal inválido: '{channelName}'", nameof(channelName));
+
+        if (platform == "starvios" && !IsAllowedStarviosSource(sourceUrl))
+            throw new ArgumentException("starvios requiere una sourceUrl HTTPS de stream.mux.com.", nameof(sourceUrl));
 
         var key     = MakeKey(platform, channelName);
         var session = new TranscodeSession(channelName);
@@ -94,7 +97,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         }
 
         _logger.LogInformation("[Transcode] Arrancando pipeline optimizado para '{Key}'...", key);
-        _ = RunTranscodeAsync(key, platform, channelName, session, ct);
+        _ = RunTranscodeAsync(key, platform, channelName, session, sourceUrl, ct);
         return Task.CompletedTask;
     }
 
@@ -146,11 +149,14 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         string platform,
         string channelName,
         TranscodeSession session,
+        string? sourceUrl,
         CancellationToken ct)
     {
         var outputDir = GetHlsDirectory(platform, channelName);
         var m3u8Path  = GetM3u8Path(platform, channelName);
-        var mp4Path   = GetMp4Path(platform, channelName);
+        // Starvios: solo retransmisión HLS, sin grabación MP4 (así no entra en la cola de subida a YouTube).
+        var isStarvios = platform == "starvios";
+        var mp4Path    = isStarvios ? "" : GetMp4Path(platform, channelName);
 
         PrepareOutputDir(outputDir);
 
@@ -165,9 +171,11 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         var isTwitch = platform == "twitch";
 
         var scriptPath = $"/tmp/sepius_transcode_{sessionId}.sh";
-        var scriptContent = isTwitch
-            ? BuildTwitchScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path)
-            : BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path);
+        var scriptContent = isStarvios
+            ? BuildDirectHlsScript(sourceUrl!, segPattern, m3u8Path)
+            : isTwitch
+                ? BuildTwitchScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path)
+                : BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path);
         await File.WriteAllTextAsync(scriptPath, scriptContent, ct).ConfigureAwait(false);
 
         if (isTwitch)
@@ -287,6 +295,33 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "#!/bin/bash",
             "set -o pipefail",
             $"{slCmd} | {ShellQuote(_options.FfmpegPath)} {ffArgs}");
+    }
+
+    /// <summary>Starvios: ffmpeg copia directamente el HLS de Mux (sin streamlink y sin MP4).</summary>
+    private string BuildDirectHlsScript(string sourceUrl, string segPattern, string m3u8Path)
+    {
+        var ffArgs = string.Join(" ",
+            "-y",
+            "-fflags +discardcorrupt+genpts",
+            "-rw_timeout 15000000",
+            "-analyzeduration 10000000",
+            "-probesize 5000000",
+            "-i", ShellQuote(sourceUrl),
+            "-map 0:v?",
+            "-map 0:a?",
+            "-c copy",
+            "-f hls",
+            "-hls_time 4",
+            "-hls_list_size 20",
+            "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
+            "-max_muxing_queue_size 1024",
+            $"-hls_segment_filename {ShellQuote(segPattern)}",
+            ShellQuote(m3u8Path));
+
+        return string.Join("\n",
+            "#!/bin/bash",
+            "set -o pipefail",
+            $"exec {ShellQuote(_options.FfmpegPath)} {ffArgs}");
     }
 
     /// <summary>
@@ -545,7 +580,23 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         => $"{platform}:{channelName}";
 
     private static string NormalizePlatform(string platform)
-        => platform.ToLowerInvariant().Trim() is "kick" ? "kick" : "twitch";
+        => platform.ToLowerInvariant().Trim() switch
+        {
+            "kick"     => "kick",
+            "starvios" => "starvios",
+            _          => "twitch",
+        };
+
+    // La URL acaba dentro de un script bash: solo se acepta el formato exacto de Mux.
+    private static readonly Regex MuxPath =
+        new(@"^/[A-Za-z0-9]{10,100}\.m3u8$", RegexOptions.Compiled);
+
+    private static bool IsAllowedStarviosSource(string? url)
+        => Uri.TryCreate(url, UriKind.Absolute, out var u)
+           && u.Scheme == Uri.UriSchemeHttps
+           && u.Host == "stream.mux.com"
+           && u.Query.Length == 0
+           && MuxPath.IsMatch(u.AbsolutePath);
 
     private static string Normalize(string channelName)
         => channelName.ToLowerInvariant().Trim();

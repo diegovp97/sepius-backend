@@ -17,7 +17,11 @@ public interface ILiveTranscodeService
     /// <summary>URL relativa al backend para que hls.js cargue el manifest.</summary>
     string GetHlsUrl(string channelName, string platform = "twitch");
 
-    Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default);
+    /// <param name="sourceUrl">
+    /// URL HLS directa de origen. Solo para plataformas sin streamlink (starvios);
+    /// si es null se usa streamlink con la URL del canal.
+    /// </param>
+    Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default, string? sourceUrl = null);
     Task StopAsync(string channelName, string platform = "twitch");
 
     /// <summary>Sesiones de grabación en curso (arrancando o grabando).</summary>

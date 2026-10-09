@@ -232,9 +232,10 @@ public sealed class TwitchEventSubWorker : BackgroundService
             ct.ThrowIfCancellationRequested();
 
             // Los canales Kick los gestiona TwitchMonitorWorker (polling), no EventSub
-            if (channel.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase))
+            if (channel.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase) ||
+                channel.Name.StartsWith("starvios:", StringComparison.OrdinalIgnoreCase))
             {
-                _logger.LogDebug("'{Channel}' es Kick, se omite en EventSub.", channel.Name);
+                _logger.LogDebug("'{Channel}' no es Twitch, se omite en EventSub.", channel.Name);
                 continue;
             }
 
@@ -290,6 +291,7 @@ public sealed class TwitchEventSubWorker : BackgroundService
         var channelRepo = scope.ServiceProvider.GetRequiredService<IChannelRepository>();
         var channels = await channelRepo.GetAllAsync(ct);
         return channels.Any(c => c.IsMonitored &&
-                                 !c.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase));
+                                 !c.Name.StartsWith("kick:", StringComparison.OrdinalIgnoreCase) &&
+                                 !c.Name.StartsWith("starvios:", StringComparison.OrdinalIgnoreCase));
     }
 }

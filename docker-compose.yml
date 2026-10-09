@@ -56,6 +56,7 @@ services:
       - Monitor__PollingIntervalSeconds=120
       - Monitor__Channels__0=elttblue
       - Monitor__Channels__1=kick:elttblue
+      - Monitor__Channels__2=starvios:elttblue
       # No subir grabaciones que duren menos de N minutos (anuncios, arranques fallidos). 0 = subir todo
       - Pipeline__MinDurationMinutes=${PIPELINE_MIN_MINUTES:-5}
       # Clave compartida con la API para la API interna del grabador
@@ -99,7 +100,7 @@ services:
       - YouTube__ClientId=${YOUTUBE_CLIENT_ID:-}
       - YouTube__ClientSecret=${YOUTUBE_CLIENT_SECRET:-}
       - YouTube__RefreshToken=${YOUTUBE_REFRESH_TOKEN:-}
-      - YouTube__PrivacyStatus=${YOUTUBE_PRIVACY_STATUS:-unlisted}
+      - YouTube__PrivacyStatus=${YOUTUBE_PRIVACY_STATUS:-public}
       # Copia de seguridad en Google Drive antes de subir a YouTube (opcional)
       - GoogleDrive__Enabled=${GOOGLE_DRIVE_ENABLED:-false}
       - GoogleDrive__ClientId=${GOOGLE_DRIVE_CLIENT_ID:-}

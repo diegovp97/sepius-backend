@@ -13,7 +13,7 @@ namespace Sepius.Recorder;
 /// </summary>
 public static class RecorderEndpoints
 {
-    private static readonly string[] Platforms = ["kick", "twitch"];
+    private static readonly string[] Platforms = ["kick", "starvios", "twitch"];
 
     public static void Map(WebApplication app)
     {

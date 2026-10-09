@@ -11,7 +11,7 @@ public sealed class YouTubeOptions
     /// <summary>
     /// Privacidad del video subido: public, unlisted, private.
     /// </summary>
-    public string PrivacyStatus { get; set; } = "unlisted";
+    public string PrivacyStatus { get; set; } = "public";
 
     /// <summary>
     /// Si es false, no se sube nada.
