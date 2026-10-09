@@ -145,7 +145,25 @@ public sealed class TwitchMonitorWorker : BackgroundService
         }
     }
 
-    private const string StarviosLiveNowUrl = "https://starvios.com/api/public/live-now?top=500";
+    /// <summary>
+    /// Misma lógica que el reproductor de Starvios: el prefijo del playback_id decide el CDN
+    /// (cf = Cloudflare Stream, bn = Bunny, resto = Mux).
+    /// </summary>
+    private static string StarviosHlsUrl(string playbackId)
+    {
+        if (System.Text.RegularExpressions.Regex.IsMatch(playbackId, "^cf[0-9a-f]{32}$"))
+            return $"https://customer-v4n77b7tsunuc58z.cloudflarestream.com/{playbackId[2..]}/manifest/video.m3u8";
+
+        if (System.Text.RegularExpressions.Regex.IsMatch(playbackId, "^bn[0-9a-f]{32}$"))
+        {
+            var t = playbackId[2..];
+            return $"https://vz-aa9d5a9c-a51.b-cdn.net/{t[..8]}-{t[8..12]}-{t[12..16]}-{t[16..20]}-{t[20..]}/playlist.m3u8";
+        }
+
+        return $"https://stream.mux.com/{playbackId}.m3u8";
+    }
+
+    private const string StarviosLiveNowUrl ="https://starvios.com/api/public/live-now?top=500";
 
     /// <summary>
     /// Starvios no tiene plugin de streamlink: se consulta su API pública de directos
@@ -190,7 +208,7 @@ public sealed class TwitchMonitorWorker : BackgroundService
             {
                 if (isTranscoding) continue;
                 _logger.LogInformation("'{Channel}' está en DIRECTO (Starvios). Iniciando HLS.", channel.Name);
-                await liveTranscode.StartAsync(slug, "starvios", ct, $"https://stream.mux.com/{playbackId}.m3u8");
+                await liveTranscode.StartAsync(slug, "starvios", ct, StarviosHlsUrl(playbackId));
             }
             else if (isTranscoding)
             {

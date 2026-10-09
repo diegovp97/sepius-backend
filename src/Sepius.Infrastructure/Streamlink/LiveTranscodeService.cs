@@ -587,16 +587,20 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             _          => "twitch",
         };
 
-    // La URL acaba dentro de un script bash: solo se acepta el formato exacto de Mux.
-    private static readonly Regex MuxPath =
-        new(@"^/[A-Za-z0-9]{10,100}\.m3u8$", RegexOptions.Compiled);
+    // La URL acaba dentro de un script bash: solo se acepta el formato exacto de cada CDN de Starvios
+    // (Mux, Cloudflare Stream o Bunny, según el prefijo del playback_id).
+    private static readonly (string Host, Regex Path)[] StarviosSources =
+    [
+        ("stream.mux.com", new(@"^/[A-Za-z0-9]{10,100}\.m3u8$", RegexOptions.Compiled)),
+        ("customer-v4n77b7tsunuc58z.cloudflarestream.com", new(@"^/[0-9a-f]{32}/manifest/video\.m3u8$", RegexOptions.Compiled)),
+        ("vz-aa9d5a9c-a51.b-cdn.net", new(@"^/[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}/playlist\.m3u8$", RegexOptions.Compiled)),
+    ];
 
     private static bool IsAllowedStarviosSource(string? url)
         => Uri.TryCreate(url, UriKind.Absolute, out var u)
            && u.Scheme == Uri.UriSchemeHttps
-           && u.Host == "stream.mux.com"
            && u.Query.Length == 0
-           && MuxPath.IsMatch(u.AbsolutePath);
+           && StarviosSources.Any(s => s.Host == u.Host && s.Path.IsMatch(u.AbsolutePath));
 
     private static string Normalize(string channelName)
         => channelName.ToLowerInvariant().Trim();
