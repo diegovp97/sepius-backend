@@ -620,11 +620,13 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     private void PrepareOutputDir(string outputDir)
     {
         Directory.CreateDirectory(outputDir);
-        DeleteHlsFiles(outputDir);
+        // removeEmptyDir: false — si no, el directorio recién creado (o vaciado) se borraba aquí mismo
+        // y ffmpeg fallaba con "Failed to open file ... No such file or directory" (HLS en 404).
+        DeleteHlsFiles(outputDir, removeEmptyDir: false);
     }
 
     /// <summary>Borra solo los segmentos (.ts) y el index.m3u8 de un directorio HLS, y el directorio si queda vacío.</summary>
-    private void DeleteHlsFiles(string dir)
+    private void DeleteHlsFiles(string dir, bool removeEmptyDir = true)
     {
         try
         {
@@ -632,7 +634,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             foreach (var f in Directory.GetFiles(dir, "*.ts")) File.Delete(f);
             var m3u8 = Path.Combine(dir, "index.m3u8");
             if (File.Exists(m3u8)) File.Delete(m3u8);
-            if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+            if (removeEmptyDir && !Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
         }
         catch (Exception ex)
         {
