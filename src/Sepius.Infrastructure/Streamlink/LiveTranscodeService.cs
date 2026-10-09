@@ -304,14 +304,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     /// <summary>Starvios: ffmpeg copia directamente el HLS de Mux (sin streamlink y sin MP4).</summary>
     private string BuildDirectHlsScript(string sourceUrl, string segPattern, string m3u8Path)
     {
-        var ffArgs = string.Join(" ",
-            "-y",
-            "-fflags +discardcorrupt+genpts",
-            "-rw_timeout 15000000",
-            "-analyzeduration 10000000",
-            "-probesize 5000000",
-            "-i", ShellQuote(sourceUrl),
-            "$map",
+        const string inputFlags = "-y -fflags +discardcorrupt+genpts -rw_timeout 15000000 -analyzeduration 10000000 -probesize 5000000";
+        var hlsOut = string.Join(" ",
             "-c copy",
             "-f hls",
             "-hls_time 4",
@@ -320,20 +314,43 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename {ShellQuote(segPattern)}",
             ShellQuote(m3u8Path));
+        var ffmpeg = ShellQuote(_options.FfmpegPath);
+        var src    = ShellQuote(sourceUrl);
 
         // El master de Starvios ofrece varias calidades (240p-1080p). Sin elegir, "-c copy" las mete
-        // todas en cada segmento. Cada variante es un "programa" de ffmpeg, en el orden del master:
-        // se elige el de mayor BANDWIDTH. Si no es un master (lista simple), se copia todo.
-        return string.Join("\n",
-            "#!/bin/bash",
-            "set -o pipefail",
-            $"idx=$(curl -fsS --max-time 15 {ShellQuote(sourceUrl)} 2>/dev/null"
-                + " | grep EXT-X-STREAM-INF"
-                + " | sed -E 's/.*[^-]BANDWIDTH=([0-9]+).*/\\1/'"
-                + " | awk '{if ($1+0 > m) {m = $1+0; i = NR-1}} END {if (m > 0) print i}') || true",
-            "if [ -n \"$idx\" ]; then map=\"-map 0:p:$idx\"; else map=\"-map 0:v? -map 0:a?\"; fi",
-            "echo \"[Transcode] Starvios: map=$map\" >&2",
-            $"exec {ShellQuote(_options.FfmpegPath)} {ffArgs}");
+        // todas en cada segmento, así que se elige la de mayor BANDWIDTH.
+        //
+        // Cloudflare Stream sirve el audio como una pista aparte (#EXT-X-MEDIA:TYPE=AUDIO con URI). Con
+        // "-map 0:p:N" sobre el master, el ffmpeg 6.1 de la imagen dejaba un stream de audio declarado pero
+        // sin paquetes (0 canales, 0 Hz): el reproductor no veía audio. Por eso, si hay pista de audio separada,
+        // se abren la variante de vídeo y la de audio como dos entradas y se mapean explícitamente.
+        // Si no la hay (audio ya mezclado, p. ej. Mux), se mantiene el mapeo por programa de antes.
+        return $$"""
+#!/bin/bash
+set -o pipefail
+SRC={{src}}
+master=$(curl -fsS --max-time 15 "$SRC" 2>/dev/null) || master=""
+base="${SRC%/*}/"
+resolve() { case "$1" in http*) echo "$1";; *) echo "$base$1";; esac; }
+
+best=$(printf '%s\n' "$master" | awk '
+  /^#EXT-X-STREAM-INF/ { bw=0; if (match($0, /[:,]BANDWIDTH=[0-9]+/)) { s=substr($0,RSTART,RLENGTH); sub(/.*=/,"",s); bw=s+0 } want=1; next }
+  want==1 && NF && $0 !~ /^#/ { if (bw>m) { m=bw; u=$0 } want=0 }
+  END { print u }')
+audio=$(printf '%s\n' "$master" | grep '^#EXT-X-MEDIA:TYPE=AUDIO' | grep -o 'URI="[^"]*"' | head -1 | sed 's/^URI="//; s/"$//')
+
+if [ -n "$best" ] && [ -n "$audio" ]; then
+  echo "[Transcode] Starvios: vídeo y audio como entradas separadas" >&2
+  exec {{ffmpeg}} {{inputFlags}} -i "$(resolve "$best")" -i "$(resolve "$audio")" -map 0:v:0 -map 1:a:0 {{hlsOut}}
+fi
+
+idx=$(printf '%s\n' "$master" | grep EXT-X-STREAM-INF \
+  | sed -E 's/.*[^-]BANDWIDTH=([0-9]+).*/\1/' \
+  | awk '{if ($1+0 > m) {m = $1+0; i = NR-1} } END {if (m > 0) print i}') || true
+if [ -n "$idx" ]; then map="-map 0:p:$idx"; else map="-map 0:v? -map 0:a?"; fi
+echo "[Transcode] Starvios: map=$map" >&2
+exec {{ffmpeg}} {{inputFlags}} -i {{src}} $map {{hlsOut}}
+""";
     }
 
     /// <summary>
