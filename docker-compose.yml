@@ -101,6 +101,7 @@ services:
       - YouTube__ClientSecret=${YOUTUBE_CLIENT_SECRET:-}
       - YouTube__RefreshToken=${YOUTUBE_REFRESH_TOKEN:-}
       - YouTube__PrivacyStatus=${YOUTUBE_PRIVACY_STATUS:-public}
+      - YouTube__DeleteAfterUpload=${YOUTUBE_DELETE_AFTER_UPLOAD:-true}
       # Copia de seguridad en Google Drive antes de subir a YouTube (opcional)
       - GoogleDrive__Enabled=${GOOGLE_DRIVE_ENABLED:-false}
       - GoogleDrive__ClientId=${GOOGLE_DRIVE_CLIENT_ID:-}

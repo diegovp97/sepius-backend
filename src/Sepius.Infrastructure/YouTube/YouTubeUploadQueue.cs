@@ -6,6 +6,7 @@ using Sepius.Application.Interfaces;
 using Sepius.Domain.Entities;
 using Sepius.Infrastructure.Drive;
 using Sepius.Infrastructure.Pipeline;
+using Sepius.Infrastructure.Streamlink;
 
 namespace Sepius.Infrastructure.YouTube;
 
@@ -69,6 +70,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
     private readonly UploadPipelineStore _store;
     private readonly YouTubeOptions _youtubeOptions;
     private readonly GoogleDriveOptions _driveOptions;
+    private readonly StreamlinkOptions _streamlinkOptions;
     private readonly ILogger<YouTubeUploadQueue> _logger;
 
     public YouTubeUploadQueue(
@@ -77,6 +79,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
         UploadPipelineStore store,
         IOptions<YouTubeOptions> youtubeOptions,
         IOptions<GoogleDriveOptions> driveOptions,
+        IOptions<StreamlinkOptions> streamlinkOptions,
         ILogger<YouTubeUploadQueue> logger)
     {
         _youtubeUpload = youtubeUpload;
@@ -84,6 +87,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
         _store = store;
         _youtubeOptions = youtubeOptions.Value;
         _driveOptions = driveOptions.Value;
+        _streamlinkOptions = streamlinkOptions.Value;
         _logger = logger;
     }
 
@@ -219,6 +223,7 @@ public sealed class YouTubeUploadQueue : BackgroundService
         {
             await RunDriveStepAsync(job, state, ct);
             await RunYouTubeStepAsync(job, state, ct);
+            DeleteLocalCopyIfSafe(job);
         }
         catch (Exception ex)
         {
@@ -317,6 +322,43 @@ public sealed class YouTubeUploadQueue : BackgroundService
 
         if (videoId is not null)
             _logger.LogInformation("Upload completed: {JobId} → {VideoId}", job.Id, videoId);
+    }
+
+    /// <summary>
+    /// Borra el MP4 local solo si TODO lo habilitado terminó bien: YouTube subido y, si el respaldo de Drive
+    /// está activo, también Drive. Solo toca ficheros .mp4 dentro de la carpeta de grabaciones.
+    /// </summary>
+    private void DeleteLocalCopyIfSafe(UploadJob job)
+    {
+        if (!_youtubeOptions.DeleteAfterUpload) return;
+        if (job.Status != UploadStatus.Completed || string.IsNullOrEmpty(job.VideoId)) return;
+        if (_driveOptions.Enabled && job.DriveStatus != "Done")
+        {
+            _logger.LogWarning("Borrado omitido para '{File}': el respaldo de Drive no está completo.", job.Recording.FileName);
+            return;
+        }
+
+        var path = Path.GetFullPath(job.Recording.FilePath);
+        var root = Path.GetFullPath(_streamlinkOptions.OutputPath).TrimEnd(Path.DirectorySeparatorChar, '/') + Path.DirectorySeparatorChar;
+        if (!path.StartsWith(root, StringComparison.Ordinal) || !path.EndsWith(".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogWarning("Borrado omitido: '{Path}' no es un .mp4 dentro de '{Root}'.", path, root);
+            return;
+        }
+
+        try
+        {
+            if (!File.Exists(path)) return;
+            var size = new FileInfo(path).Length;
+            File.Delete(path);
+            _logger.LogInformation(
+                "Borrado local tras subir: '{File}' ({Size:N0} bytes liberados; YouTube={VideoId}, Drive={Drive}).",
+                job.Recording.FileName, size, job.VideoId, job.DriveStatus ?? "desactivado");
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "No se pudo borrar '{File}' tras subirlo.", job.Recording.FileName);
+        }
     }
 
     private async Task SaveSafelyAsync(Func<Task> save, UploadJob job)
