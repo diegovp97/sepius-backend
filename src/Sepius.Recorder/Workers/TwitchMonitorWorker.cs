@@ -62,9 +62,14 @@ public sealed class TwitchMonitorWorker : BackgroundService
         using var timer = new PeriodicTimer(
             TimeSpan.FromSeconds(_options.PollingIntervalSeconds));
 
+        // Primera comprobación nada más arrancar: el PeriodicTimer espera un intervalo completo antes de su
+        // primer tick, y tras cada reinicio del grabador un directo de Kick/Starvios ya en marcha tardaba hasta 2 min.
+        var firstRun = true;
+
         // WaitForNextTickAsync devuelve false cuando el timer es dispose/cancelado
-        while (await timer.WaitForNextTickAsync(stoppingToken))
+        while (firstRun || await timer.WaitForNextTickAsync(stoppingToken))
         {
+            firstRun = false;
             try
             {
                 await CheckChannelsAsync(stoppingToken);
