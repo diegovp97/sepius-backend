@@ -165,6 +165,12 @@ public sealed class TwitchMonitorWorker : BackgroundService
 
     private const string StarviosLiveNowUrl ="https://starvios.com/api/public/live-now?top=500";
 
+    // live-now puede omitir un canal en una consulta suelta (paginación, caché, parpadeo de su API).
+    // Parar el transcode a la primera ausencia cortaba el directo y lo reabría en el siguiente sondeo,
+    // así que solo se para tras N lecturas seguidas sin el canal.
+    private const int StarviosMissesBeforeStop = 4;
+    private readonly Dictionary<string, int> _starviosMisses = new(StringComparer.OrdinalIgnoreCase);
+
     /// <summary>
     /// Starvios no tiene plugin de streamlink: se consulta su API pública de directos
     /// y se retransmite el HLS de Mux (stream.mux.com/{playback_id}.m3u8) vía ffmpeg.
@@ -206,14 +212,29 @@ public sealed class TwitchMonitorWorker : BackgroundService
 
             if (live.TryGetValue(slug, out var playbackId))
             {
+                _starviosMisses.Remove(slug);
                 if (isTranscoding) continue;
                 _logger.LogInformation("'{Channel}' está en DIRECTO (Starvios). Iniciando HLS.", channel.Name);
                 await liveTranscode.StartAsync(slug, "starvios", ct, StarviosHlsUrl(playbackId));
             }
             else if (isTranscoding)
             {
+                var misses = _starviosMisses.GetValueOrDefault(slug) + 1;
+                _starviosMisses[slug] = misses;
+                if (misses < StarviosMissesBeforeStop)
+                {
+                    _logger.LogWarning("Starvios: '{Channel}' no aparece en live-now ({Misses}/{Max}). Se mantiene el HLS.",
+                        channel.Name, misses, StarviosMissesBeforeStop);
+                    continue;
+                }
+
+                _starviosMisses.Remove(slug);
                 _logger.LogInformation("'{Channel}' ha terminado el directo (Starvios). Deteniendo HLS.", channel.Name);
                 await liveTranscode.StopAsync(slug, "starvios");
+            }
+            else
+            {
+                _starviosMisses.Remove(slug);
             }
         }
     }
