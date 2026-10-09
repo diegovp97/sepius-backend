@@ -307,8 +307,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-analyzeduration 10000000",
             "-probesize 5000000",
             "-i", ShellQuote(sourceUrl),
-            "-map 0:v?",
-            "-map 0:a?",
+            "$map",
             "-c copy",
             "-f hls",
             "-hls_time 4",
@@ -318,9 +317,18 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             $"-hls_segment_filename {ShellQuote(segPattern)}",
             ShellQuote(m3u8Path));
 
+        // El master de Starvios ofrece varias calidades (240p-1080p). Sin elegir, "-c copy" las mete
+        // todas en cada segmento. Cada variante es un "programa" de ffmpeg, en el orden del master:
+        // se elige el de mayor BANDWIDTH. Si no es un master (lista simple), se copia todo.
         return string.Join("\n",
             "#!/bin/bash",
             "set -o pipefail",
+            $"idx=$(curl -fsS --max-time 15 {ShellQuote(sourceUrl)} 2>/dev/null"
+                + " | grep EXT-X-STREAM-INF"
+                + " | sed -E 's/.*[^-]BANDWIDTH=([0-9]+).*/\\1/'"
+                + " | awk '{if ($1+0 > m) {m = $1+0; i = NR-1}} END {if (m > 0) print i}') || true",
+            "if [ -n \"$idx\" ]; then map=\"-map 0:p:$idx\"; else map=\"-map 0:v? -map 0:a?\"; fi",
+            "echo \"[Transcode] Starvios: map=$map\" >&2",
             $"exec {ShellQuote(_options.FfmpegPath)} {ffArgs}");
     }
 
