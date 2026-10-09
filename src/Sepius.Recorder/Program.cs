@@ -68,6 +68,7 @@ RecorderEndpoints.Map(app);
 // Cuando termina una grabación: se apunta en upload_pipeline (si dura lo suficiente) y la API la sube.
 {
     var live = app.Services.GetRequiredService<ILiveTranscodeService>();
+    live.PurgeStaleHls();
     var intake = app.Services.GetRequiredService<RecordingIntake>();
     live.RecordingCompleted += async recording => { await intake.HandleAsync(recording); };
 }

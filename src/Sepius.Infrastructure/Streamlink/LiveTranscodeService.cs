@@ -494,6 +494,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
         KillSession(session, key);
         session.PipelineProcess?.Dispose();
+        ScheduleHlsCleanup(key, platform, channelName);
 
         // Si la grabación MP4 existe y el stream terminó correctamente, notificar
         if (finalStatus is TranscodeStatus.Stopped or TranscodeStatus.Stopping && File.Exists(mp4Path))
@@ -619,9 +620,56 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     private void PrepareOutputDir(string outputDir)
     {
         Directory.CreateDirectory(outputDir);
-        foreach (var f in Directory.GetFiles(outputDir, "*.ts")) File.Delete(f);
-        var m3u8 = Path.Combine(outputDir, "index.m3u8");
-        if (File.Exists(m3u8)) File.Delete(m3u8);
+        DeleteHlsFiles(outputDir);
+    }
+
+    /// <summary>Borra solo los segmentos (.ts) y el index.m3u8 de un directorio HLS, y el directorio si queda vacío.</summary>
+    private void DeleteHlsFiles(string dir)
+    {
+        try
+        {
+            if (!Directory.Exists(dir)) return;
+            foreach (var f in Directory.GetFiles(dir, "*.ts")) File.Delete(f);
+            var m3u8 = Path.Combine(dir, "index.m3u8");
+            if (File.Exists(m3u8)) File.Delete(m3u8);
+            if (!Directory.EnumerateFileSystemEntries(dir).Any()) Directory.Delete(dir);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "[Transcode] No se pudo limpiar el HLS de '{Dir}'.", dir);
+        }
+    }
+
+    /// <summary>
+    /// Tras acabar un directo, el HLS se borra a los 2 minutos (margen para que los espectadores
+    /// terminen de ver los últimos segmentos). Si el canal vuelve a emitir antes, no se toca nada.
+    /// </summary>
+    private void ScheduleHlsCleanup(string key, string platform, string channelName)
+    {
+        var dir = GetHlsDirectory(platform, channelName);
+        _ = Task.Run(async () =>
+        {
+            await Task.Delay(TimeSpan.FromMinutes(2)).ConfigureAwait(false);
+            if (_active.ContainsKey(key)) return;
+            DeleteHlsFiles(dir);
+            _logger.LogInformation("[Transcode] HLS de '{Key}' borrado (directo terminado).", key);
+        });
+    }
+
+    /// <summary>
+    /// Al arrancar el grabador no hay ninguna sesión: todo lo que quede en live/ son restos
+    /// (de canales que ya no se vigilan o de un reinicio). Solo se tocan ficheros HLS.
+    /// </summary>
+    public void PurgeStaleHls()
+    {
+        var root = Path.Combine(_options.OutputPath, "live");
+        if (!Directory.Exists(root)) return;
+
+        foreach (var platformDir in Directory.GetDirectories(root))
+            foreach (var channelDir in Directory.GetDirectories(platformDir))
+                DeleteHlsFiles(channelDir);
+
+        _logger.LogInformation("[Transcode] Restos de HLS anteriores borrados al arrancar.");
     }
 
     private void KillSafely(Process? process, string label)

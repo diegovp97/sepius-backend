@@ -24,6 +24,9 @@ public interface ILiveTranscodeService
     Task StartAsync(string channelName, string platform = "twitch", CancellationToken ct = default, string? sourceUrl = null);
     Task StopAsync(string channelName, string platform = "twitch");
 
+    /// <summary>Borra los restos HLS (.ts / index.m3u8) que no pertenezcan a una sesión activa. Solo al arrancar.</summary>
+    void PurgeStaleHls();
+
     /// <summary>Sesiones de grabación en curso (arrancando o grabando).</summary>
     IReadOnlyList<LiveSessionDto> GetActiveSessions();
 
