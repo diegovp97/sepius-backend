@@ -154,9 +154,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     {
         var outputDir = GetHlsDirectory(platform, channelName);
         var m3u8Path  = GetM3u8Path(platform, channelName);
-        // Starvios: solo retransmisión HLS, sin grabación MP4 (así no entra en la cola de subida a YouTube).
         var isStarvios = platform == "starvios";
-        var mp4Path    = isStarvios ? "" : GetMp4Path(platform, channelName);
+        var mp4Path    = GetMp4Path(platform, channelName);
 
         PrepareOutputDir(outputDir);
 
@@ -172,7 +171,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
 
         var scriptPath = $"/tmp/sepius_transcode_{sessionId}.sh";
         var scriptContent = isStarvios
-            ? BuildDirectHlsScript(sourceUrl!, segPattern, m3u8Path)
+            ? BuildDirectHlsScript(sourceUrl!, segPattern, m3u8Path, mp4Path)
             : isTwitch
                 ? BuildTwitchScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path)
                 : BuildStreamlinkScript(sessionId, streamUrl, segPattern, m3u8Path, mp4Path);
@@ -301,19 +300,20 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             $"{slCmd} | {ShellQuote(_options.FfmpegPath)} {ffArgs}");
     }
 
-    /// <summary>Starvios: ffmpeg copia directamente el HLS de Mux (sin streamlink y sin MP4).</summary>
-    private string BuildDirectHlsScript(string sourceUrl, string segPattern, string m3u8Path)
+    /// <summary>Starvios: ffmpeg copia directamente el HLS de origen (sin streamlink) a HLS + MP4 con una salida tee.</summary>
+    private string BuildDirectHlsScript(string sourceUrl, string segPattern, string m3u8Path, string mp4Path)
     {
         const string inputFlags = "-y -fflags +discardcorrupt+genpts -rw_timeout 15000000 -analyzeduration 10000000 -probesize 5000000";
-        var hlsOut = string.Join(" ",
-            "-c copy",
-            "-f hls",
-            "-hls_time 4",
-            "-hls_list_size 20",
+        // Dos salidas (HLS y MP4) con "-c copy". Con el muxer tee el MP4 falla (tag de códec incompatible),
+        // así que se usan dos salidas normales; los -map se repiten porque aplican solo a la salida que sigue.
+        string Outputs(string map) => string.Join(" ",
+            map, "-c copy", "-f hls", "-hls_time 4", "-hls_list_size 20",
             "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename {ShellQuote(segPattern)}",
-            ShellQuote(m3u8Path));
+            ShellQuote(m3u8Path),
+            map, "-c copy", "-max_muxing_queue_size 1024",
+            ShellQuote(mp4Path));
         var ffmpeg = ShellQuote(_options.FfmpegPath);
         var src    = ShellQuote(sourceUrl);
 
@@ -341,7 +341,7 @@ audio=$(printf '%s\n' "$master" | grep '^#EXT-X-MEDIA:TYPE=AUDIO' | grep -o 'URI
 
 if [ -n "$best" ] && [ -n "$audio" ]; then
   echo "[Transcode] Starvios: vídeo y audio como entradas separadas" >&2
-  exec {{ffmpeg}} {{inputFlags}} -i "$(resolve "$best")" -i "$(resolve "$audio")" -map 0:v:0 -map 1:a:0 {{hlsOut}}
+  exec {{ffmpeg}} {{inputFlags}} -i "$(resolve "$best")" -i "$(resolve "$audio")" {{Outputs("-map 0:v:0 -map 1:a:0")}}
 fi
 
 idx=$(printf '%s\n' "$master" | grep EXT-X-STREAM-INF \
@@ -349,7 +349,7 @@ idx=$(printf '%s\n' "$master" | grep EXT-X-STREAM-INF \
   | awk '{if ($1+0 > m) {m = $1+0; i = NR-1} } END {if (m > 0) print i}') || true
 if [ -n "$idx" ]; then map="-map 0:p:$idx"; else map="-map 0:v? -map 0:a?"; fi
 echo "[Transcode] Starvios: map=$map" >&2
-exec {{ffmpeg}} {{inputFlags}} -i {{src}} $map {{hlsOut}}
+exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
 """;
     }
 
