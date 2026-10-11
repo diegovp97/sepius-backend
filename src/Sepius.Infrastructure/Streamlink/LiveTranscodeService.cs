@@ -29,6 +29,16 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     private bool _disposed;
     private int _pendingHandlers; // handlers de RecordingCompleted aún en ejecución
 
+    // Starvios: la fuente (Cloudflare Stream) se corta cada vez que el streamer se desconecta, y cada corte
+    // acababa como un MP4 y un vídeo de YouTube distintos. Los trozos se guardan aquí y se unen en un solo
+    // MP4 cuando el canal lleva StarviosMergeDelay sin emitir.
+    private static readonly TimeSpan StarviosMergeDelay = TimeSpan.FromMinutes(10);
+    private const long StarviosMinPartBytes = 1_000_000; // por debajo es un intento fallido sin datos
+    private readonly object _starviosLock = new();
+    private readonly Dictionary<string, (List<string> Parts, DateTime LastEndUtc)> _starviosPending = new();
+    private Timer? _mergeTimer;
+    private int _mergeRunning;
+
     private static readonly Regex ValidChannelName =
         new(@"^[a-z0-9_]{1,25}$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
@@ -120,7 +130,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     public async Task StopAllAsync(TimeSpan timeout)
     {
         var sessions = _active.ToArray();
-        if (sessions.Length == 0 && Volatile.Read(ref _pendingHandlers) == 0) return;
+        if (sessions.Length == 0 && Volatile.Read(ref _pendingHandlers) == 0 && !HasStarviosPending()) return;
 
         _logger.LogInformation("[Transcode] Apagando: cierre limpio de {Count} sesión(es)…", sessions.Length);
 
@@ -136,6 +146,11 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         var deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline &&
                (!_active.IsEmpty || Volatile.Read(ref _pendingHandlers) > 0 || kills.Any(k => !k.IsCompleted)))
+            await Task.Delay(250).ConfigureAwait(false);
+
+        // Apagando: los trozos de Starvios en espera se unen ya (no se pueden dejar para dentro de 10 min).
+        await FlushStarviosAsync(force: true).ConfigureAwait(false);
+        while (DateTime.UtcNow < deadline && Volatile.Read(ref _pendingHandlers) > 0)
             await Task.Delay(250).ConfigureAwait(false);
 
         if (!_active.IsEmpty)
@@ -223,7 +238,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
                 "[Transcode] Pipeline activo. Key='{Key}' | PID={Pid} | HLS={M3u8} | MP4={Mp4}",
                 key, proc.Id, m3u8Path, mp4Path);
 
-            StartWatchdog(key, session, ct);
+            StartWatchdog(key, session, isStarvios ? m3u8Path : null, ct);
 
             await proc.WaitForExitAsync(ct).ConfigureAwait(false);
 
@@ -443,7 +458,12 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
             $"exec {ShellQuote(_options.FfmpegPath)} {ffArgs}");
     }
 
-    private void StartWatchdog(string key, TranscodeSession session, CancellationToken ct)
+    // Starvios: si ffmpeg sigue vivo pero la playlist HLS lleva tanto sin escribirse, el proceso está colgado
+    // (los espectadores ven los mismos segmentos en bucle). Se cierra para que el monitor lo reabra.
+    private static readonly TimeSpan HlsStallTimeout = TimeSpan.FromSeconds(90);
+    private static readonly TimeSpan HlsStallStartupGrace = TimeSpan.FromSeconds(180);
+
+    private void StartWatchdog(string key, TranscodeSession session, string? stallCheckM3u8, CancellationToken ct)
     {
         var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _watchdogs[key] = cts;
@@ -468,6 +488,17 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
                         session.Status = TranscodeStatus.Failed;
                         break;
                     }
+
+                    if (stallCheckM3u8 is not null && IsHlsStalled(stallCheckM3u8, session))
+                    {
+                        _logger.LogWarning(
+                            "[Watchdog] La playlist HLS de '{Key}' lleva más de {Secs} s sin actualizarse. Cerrando el proceso colgado.",
+                            key, (int)HlsStallTimeout.TotalSeconds);
+                        // Stopping (no Failed) para que el MP4 se cierre y entre en la cola de subida.
+                        session.Status = TranscodeStatus.Stopping;
+                        KillSession(session, key);
+                        break;
+                    }
                 }
                 catch (OperationCanceledException) { break; }
                 catch (Exception ex)
@@ -476,6 +507,15 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
                 }
             }
         }, cts.Token);
+    }
+
+    private static bool IsHlsStalled(string m3u8Path, TranscodeSession session)
+    {
+        var age = DateTimeOffset.UtcNow - session.StartedAt;
+        if (!File.Exists(m3u8Path))
+            return age > HlsStallStartupGrace;
+        var sinceWrite = DateTime.UtcNow - File.GetLastWriteTimeUtc(m3u8Path);
+        return age > HlsStallTimeout && sinceWrite > HlsStallTimeout;
     }
 
     private void StopWatchdog(string key)
@@ -517,33 +557,182 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
         session.PipelineProcess?.Dispose();
         ScheduleHlsCleanup(key, platform, channelName);
 
-        // Si la grabación MP4 existe y el stream terminó correctamente, notificar
-        if (finalStatus is TranscodeStatus.Stopped or TranscodeStatus.Stopping && File.Exists(mp4Path))
+        if (platform == "starvios")
         {
-            var fileInfo = new FileInfo(mp4Path);
-            if (fileInfo.Length > 0)
-            {
-                // Aplicar faststart como post-proceso para que el moov atom quede al inicio
-                var repaired = await ApplyFaststartAsync(mp4Path).ConfigureAwait(false);
-                if (repaired)
-                    _logger.LogInformation(
-                        "[Transcode] Faststart aplicado a: {Path}", mp4Path);
-
-                var finalInfo = new FileInfo(mp4Path);
-                _logger.LogInformation(
-                    "[Transcode] Grabación MP4 completada: {Path} ({Size:N0} bytes)",
-                    mp4Path, finalInfo.Length);
-
-                // FromFile toma el inicio real del nombre del fichero (yyyyMMdd_HHmmss, UTC). Con Create()
-                // StartedAt valdría "ahora" (el final del directo): duración ≈ 0 y título con la hora de fin.
-                var recording = Recording.FromFile(channelName, mp4Path);
-                recording.EndedAt = DateTime.UtcNow;
-
-                FireRecordingCompleted(recording);
-            }
+            AddStarviosPart(channelName, mp4Path);
+            return;
         }
 
-        await Task.CompletedTask;
+        // Si la grabación MP4 existe y el stream terminó correctamente, notificar
+        if (finalStatus is TranscodeStatus.Stopped or TranscodeStatus.Stopping && File.Exists(mp4Path))
+            await FinalizeAndFireAsync(channelName, mp4Path).ConfigureAwait(false);
+    }
+
+    /// <summary>Faststart + aviso de grabación completada (la apunta en la cola de subida).</summary>
+    private async Task FinalizeAndFireAsync(string channelName, string mp4Path, DateTime? endedAtUtc = null)
+    {
+        var fileInfo = new FileInfo(mp4Path);
+        if (!fileInfo.Exists || fileInfo.Length == 0) return;
+
+        // Aplicar faststart como post-proceso para que el moov atom quede al inicio
+        var repaired = await ApplyFaststartAsync(mp4Path).ConfigureAwait(false);
+        if (repaired)
+            _logger.LogInformation("[Transcode] Faststart aplicado a: {Path}", mp4Path);
+
+        var finalInfo = new FileInfo(mp4Path);
+        _logger.LogInformation(
+            "[Transcode] Grabación MP4 completada: {Path} ({Size:N0} bytes)", mp4Path, finalInfo.Length);
+
+        // FromFile toma el inicio real del nombre del fichero (yyyyMMdd_HHmmss, UTC). Con Create()
+        // StartedAt valdría "ahora" (el final del directo): duración ≈ 0 y título con la hora de fin.
+        var recording = Recording.FromFile(channelName, mp4Path);
+        recording.EndedAt = endedAtUtc ?? DateTime.UtcNow;
+
+        FireRecordingCompleted(recording);
+    }
+
+    // ── Starvios: unir los trozos de un mismo directo ──────────────────────
+
+    private bool HasStarviosPending()
+    {
+        lock (_starviosLock) return _starviosPending.Count > 0;
+    }
+
+    private void AddStarviosPart(string channelName, string mp4Path)
+    {
+        if (!File.Exists(mp4Path)) return;
+
+        // Intento sin datos (la fuente aún no tenía vídeo): no es una grabación.
+        if (new FileInfo(mp4Path).Length < StarviosMinPartBytes)
+        {
+            try { File.Delete(mp4Path); } catch { /* sin importancia */ }
+            return;
+        }
+
+        lock (_starviosLock)
+        {
+            if (!_starviosPending.TryGetValue(channelName, out var entry))
+                entry = (new List<string>(), DateTime.UtcNow);
+            entry.Parts.Add(mp4Path);
+            _starviosPending[channelName] = (entry.Parts, DateTime.UtcNow);
+
+            _mergeTimer ??= new Timer(_ => _ = FlushStarviosAsync(force: false), null,
+                TimeSpan.FromSeconds(60), TimeSpan.FromSeconds(60));
+        }
+
+        _logger.LogInformation(
+            "[Transcode] Starvios: trozo guardado ({Path}). Se unirá con el resto si el canal no vuelve en {Min} min.",
+            mp4Path, (int)StarviosMergeDelay.TotalMinutes);
+    }
+
+    private async Task FlushStarviosAsync(bool force)
+    {
+        if (Interlocked.CompareExchange(ref _mergeRunning, 1, 0) != 0) return;
+        Interlocked.Increment(ref _pendingHandlers);
+        try
+        {
+            List<(string Channel, List<string> Parts, DateTime LastEnd)> due = [];
+            lock (_starviosLock)
+            {
+                foreach (var (channel, entry) in _starviosPending.ToArray())
+                {
+                    if (!force)
+                    {
+                        if (IsTranscoding(channel, "starvios")) continue;
+                        if (DateTime.UtcNow - entry.LastEndUtc < StarviosMergeDelay) continue;
+                    }
+                    due.Add((channel, entry.Parts, entry.LastEndUtc));
+                    _starviosPending.Remove(channel);
+                }
+            }
+
+            foreach (var (channel, parts, lastEnd) in due)
+            {
+                try { await MergeStarviosPartsAsync(channel, parts, lastEnd).ConfigureAwait(false); }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex, "[Transcode] Starvios: error uniendo los trozos de '{Channel}'.", channel);
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Decrement(ref _pendingHandlers);
+            Interlocked.Exchange(ref _mergeRunning, 0);
+        }
+    }
+
+    private async Task MergeStarviosPartsAsync(string channelName, List<string> parts, DateTime lastEndUtc)
+    {
+        var files = parts.Where(File.Exists).OrderBy(f => f, StringComparer.Ordinal).ToList();
+        if (files.Count == 0) return;
+
+        if (files.Count == 1)
+        {
+            await FinalizeAndFireAsync(channelName, files[0], lastEndUtc).ConfigureAwait(false);
+            return;
+        }
+
+        _logger.LogInformation("[Transcode] Starvios: uniendo {Count} trozos de '{Channel}' en un solo MP4.",
+            files.Count, channelName);
+
+        var first      = files[0];
+        var listPath   = first + ".concat.txt";
+        var mergedPath = first + ".merged.mp4";
+        var ok = false;
+        try
+        {
+            // Formato del demuxer concat: file 'ruta' (las comillas simples dentro de la ruta se escapan).
+            await File.WriteAllLinesAsync(listPath,
+                files.Select(f => "file '" + f.Replace("'", "'\\''") + "'")).ConfigureAwait(false);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = _options.FfmpegPath,
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+            foreach (var a in new[] { "-v", "error", "-nostats", "-y", "-f", "concat", "-safe", "0", "-i", listPath,
+                                      "-c", "copy", "-movflags", "+faststart", mergedPath })
+                psi.ArgumentList.Add(a);
+
+            using var proc = new Process { StartInfo = psi };
+            proc.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data)) _logger.LogWarning("[concat|{Channel}] {L}", channelName, e.Data);
+            };
+            proc.Start();
+            proc.BeginErrorReadLine();
+            await proc.WaitForExitAsync().ConfigureAwait(false);
+
+            ok = proc.ExitCode == 0 && File.Exists(mergedPath) && new FileInfo(mergedPath).Length > 0;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "[Transcode] Starvios: fallo al unir los trozos de '{Channel}'.", channelName);
+        }
+
+        try { File.Delete(listPath); } catch { /* sin importancia */ }
+
+        if (ok)
+        {
+            foreach (var f in files) { try { File.Delete(f); } catch { /* sin importancia */ } }
+            File.Move(mergedPath, first);
+            // faststart ya aplicado en la unión: se notifica sin volver a pasarlo.
+            var recording = Recording.FromFile(channelName, first);
+            recording.EndedAt = lastEndUtc;
+            _logger.LogInformation("[Transcode] Starvios: unión completada: {Path} ({Size:N0} bytes)",
+                first, new FileInfo(first).Length);
+            FireRecordingCompleted(recording);
+            return;
+        }
+
+        // La unión falló: no se pierde nada, cada trozo se sube por separado como hasta ahora.
+        try { if (File.Exists(mergedPath)) File.Delete(mergedPath); } catch { /* sin importancia */ }
+        _logger.LogWarning("[Transcode] Starvios: no se pudo unir; se suben los {Count} trozos por separado.", files.Count);
+        foreach (var f in files)
+            await FinalizeAndFireAsync(channelName, f, File.GetLastWriteTimeUtc(f)).ConfigureAwait(false);
     }
 
     private void KillSession(TranscodeSession session, string key)
@@ -776,6 +965,7 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
 
     public void Dispose()
     {
+        _mergeTimer?.Dispose();
         if (_disposed) return;
         _disposed = true;
 
