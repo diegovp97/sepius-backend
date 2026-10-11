@@ -299,8 +299,8 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-map 0:a?",
             "-c copy",
             "-f hls",
-            "-hls_time 4",
-            "-hls_list_size 20",
+            "-hls_time 2",
+            "-hls_list_size 30",
             "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename {ShellQuote(segPattern)}",
@@ -318,11 +318,14 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
     /// <summary>Starvios: ffmpeg copia directamente el HLS de origen (sin streamlink) a HLS + MP4 con una salida tee.</summary>
     private string BuildDirectHlsScript(string sourceUrl, string segPattern, string m3u8Path, string mp4Path)
     {
-        const string inputFlags = "-y -fflags +discardcorrupt+genpts -rw_timeout 15000000 -analyzeduration 10000000 -probesize 5000000";
+        // live_start_index -1: empezar en el último segmento de la fuente (por defecto ffmpeg arranca 3 segmentos
+        // atrás, ≈6 s de retraso fijo). hls_time 2: segmentos de 2 s (la fuente ya los emite así), para que el
+        // reproductor vaya 3 segmentos = 6 s por detrás en vez de 12 s.
+        const string inputFlags = "-y -fflags +discardcorrupt+genpts -rw_timeout 15000000 -analyzeduration 10000000 -probesize 5000000 -live_start_index -1";
         // Dos salidas (HLS y MP4) con "-c copy". Con el muxer tee el MP4 falla (tag de códec incompatible),
         // así que se usan dos salidas normales; los -map se repiten porque aplican solo a la salida que sigue.
         string Outputs(string map) => string.Join(" ",
-            map, "-c copy", "-f hls", "-hls_time 4", "-hls_list_size 20",
+            map, "-c copy", "-f hls", "-hls_time 2", "-hls_list_size 30",
             "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename {ShellQuote(segPattern)}",
