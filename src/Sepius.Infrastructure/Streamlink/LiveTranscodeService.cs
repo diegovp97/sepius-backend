@@ -15,7 +15,7 @@ namespace Sepius.Infrastructure.Streamlink;
 /// OPTIMIZACIONES vs versión anterior:
 ///   1. UN solo streamlink por canal (antes eran 2: uno para HLS, otro para .mp4).
 ///   2. ffmpeg escribe HLS + MP4 en la misma pasada usando salidas múltiples.
-///   3. HLS: hls_time=4, hls_list_size=10 (más buffer, menos cortes).
+///   3. HLS: hls_time=2, hls_list_size=30 (segmentos cortos = menos retraso respecto al chat).
 ///   4. Health monitor: watchdog task que detecta procesos muertos y auto-reinicia.
 ///   5. RecordingCompleted event integrado (ya no hace falta StreamlinkService separado).
 /// </summary>
@@ -282,8 +282,14 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         var additionalArgs = string.IsNullOrWhiteSpace(_options.AdditionalArgs) ? string.Empty : $" {_options.AdditionalArgs.Trim()}";
         var slLogPath = $"/tmp/sl_{sessionId}.log";
 
+        // Menos retraso: por defecto Streamlink va 3 segmentos por detrás del borde live. Twitch tiene modo de baja
+        // latencia propio (borde a 2 segmentos y prefetch); en Kick basta con acercar el borde.
+        var latencyArgs = streamUrl.Contains("twitch.tv", StringComparison.OrdinalIgnoreCase)
+            ? " --twitch-low-latency"
+            : " --hls-live-edge 2";
+
         var slCmd = string.Join(" ",
-            ShellQuote(_options.ExecutablePath) + additionalArgs,
+            ShellQuote(_options.ExecutablePath) + additionalArgs + latencyArgs,
             ShellQuote(streamUrl),
             ShellQuote(quality),
             "--stdout",
@@ -416,7 +422,7 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
     {
         var height = Math.Clamp(_options.YtDlpTranscodeHeight, 240, 1080);
         var teeTarget = string.Join("|",
-            $"[f=hls:hls_time=4:hls_list_size=20:hls_flags=delete_segments+append_list+omit_endlist+independent_segments:hls_segment_filename={segPattern}]{m3u8Path}",
+            $"[f=hls:hls_time=2:hls_list_size=30:hls_flags=delete_segments+append_list+omit_endlist+independent_segments:hls_segment_filename={segPattern}]{m3u8Path}",
             $"[f=mp4:movflags=+faststart]{mp4Path}");
 
         var ffArgs = string.Join(" ",
