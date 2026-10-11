@@ -175,6 +175,28 @@ public sealed class TwitchMonitorWorker : BackgroundService
     // así que solo se para tras N lecturas seguidas sin el canal.
     private const int StarviosMissesBeforeStop = 4;
     private readonly Dictionary<string, int> _starviosMisses = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _starviosNoVideo = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Comprueba que el HLS de origen devuelve una playlist con contenido. Si responde 204/vacío/error HTTP, aún no hay
+    /// vídeo. Si la comprobación en sí falla (red, timeout) se deja pasar: es mejor intentar arrancar que perder un directo.
+    /// </summary>
+    private static async Task<bool> StarviosSourceHasVideoAsync(string hlsUrl, CancellationToken ct)
+    {
+        try
+        {
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(10) };
+            http.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0 (compatible; SepiusMonitor)");
+            using var res = await http.GetAsync(hlsUrl, ct);
+            if (!res.IsSuccessStatusCode || res.StatusCode == System.Net.HttpStatusCode.NoContent) return false;
+            var body = await res.Content.ReadAsStringAsync(ct);
+            return body.Contains("#EXTM3U", StringComparison.Ordinal);
+        }
+        catch (Exception) when (!ct.IsCancellationRequested)
+        {
+            return true;
+        }
+    }
 
     /// <summary>
     /// Starvios no tiene plugin de streamlink: se consulta su API pública de directos
@@ -219,8 +241,20 @@ public sealed class TwitchMonitorWorker : BackgroundService
             {
                 _starviosMisses.Remove(slug);
                 if (isTranscoding) continue;
+
+                // live-now lista canales cuyo encoder está desconectado: la fuente responde 204 sin vídeo y ffmpeg
+                // fallaba cada sondeo (decenas de arranques inútiles, y la web parpadeaba como "en directo").
+                var hlsUrl = StarviosHlsUrl(playbackId);
+                if (!await StarviosSourceHasVideoAsync(hlsUrl, ct))
+                {
+                    if (_starviosNoVideo.Add(slug))
+                        _logger.LogInformation("Starvios: '{Channel}' figura en directo pero la fuente aún no tiene vídeo. Se espera.", channel.Name);
+                    continue;
+                }
+                _starviosNoVideo.Remove(slug);
+
                 _logger.LogInformation("'{Channel}' está en DIRECTO (Starvios). Iniciando HLS.", channel.Name);
-                await liveTranscode.StartAsync(slug, "starvios", ct, StarviosHlsUrl(playbackId));
+                await liveTranscode.StartAsync(slug, "starvios", ct, hlsUrl);
             }
             else if (isTranscoding)
             {
