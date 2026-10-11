@@ -8,9 +8,23 @@ public class AppDbContext(DbContextOptions<AppDbContext> options) : DbContext(op
     public DbSet<ChatMessage> ChatMessages => Set<ChatMessage>();
     public DbSet<UploadPipeline> UploadPipelines => Set<UploadPipeline>();
     public DbSet<Channel> Channels => Set<Channel>();
+    public DbSet<Clip> Clips => Set<Clip>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
+        modelBuilder.Entity<Clip>(e =>
+        {
+            e.ToTable("clips");
+            e.HasKey(x => x.Id);
+            e.Property(x => x.Channel).HasMaxLength(32).IsRequired();
+            e.Property(x => x.Platform).HasMaxLength(16).IsRequired();
+            e.Property(x => x.Title).HasMaxLength(80).IsRequired();
+            e.Property(x => x.Nickname).HasMaxLength(32).IsRequired();
+            e.Property(x => x.FileName).HasMaxLength(64).IsRequired();
+            e.Property(x => x.ThumbFileName).HasMaxLength(64);
+            e.HasIndex(x => x.CreatedAt);
+        });
+
         modelBuilder.Entity<Channel>(e =>
         {
             e.ToTable("channels");

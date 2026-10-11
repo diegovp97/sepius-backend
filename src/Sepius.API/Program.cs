@@ -100,6 +100,11 @@ builder.Services.AddRateLimiter(o =>
     o.AddPolicy("login", ctx => RateLimitPartition.GetFixedWindowLimiter(
         ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
         _ => new FixedWindowRateLimiterOptions { PermitLimit = 5, Window = TimeSpan.FromMinutes(1) }));
+
+    // Clips: 3 cada 10 minutos por IP (cortar es trabajo de ffmpeg y los ficheros ocupan disco)
+    o.AddPolicy("clip", ctx => RateLimitPartition.GetFixedWindowLimiter(
+        ctx.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+        _ => new FixedWindowRateLimiterOptions { PermitLimit = 3, Window = TimeSpan.FromMinutes(10) }));
 });
 
 // CORS para el frontend Angular
@@ -179,6 +184,7 @@ app.UseAuthorization();
 // Servir los ficheros HLS estáticos (/live/{channel}/index.m3u8 y segmentos .ts)
 // DEBE ir después de UseCors para que los headers CORS se apliquen
 app.UseHlsStaticFiles();
+app.UseClipFiles();
 
 app.MapHealthChecks("/health");
 app.MapHub<ChatHub>("/hubs/chat");

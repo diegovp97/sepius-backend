@@ -31,6 +31,21 @@ public static class RecorderEndpoints
                 await next();
             }));
 
+        // Corta un clip de los últimos segundos del HLS en vivo (lo pide la API cuando un espectador pulsa "Clip").
+        app.MapPost("/internal/clips", async (string channel, string platform, int seconds, int? behind,
+            IClipService clips, CancellationToken ct) =>
+        {
+            try
+            {
+                var cut = await clips.CutAsync(channel, platform, seconds, behind ?? 0, ct);
+                return cut is null ? Results.NotFound() : Results.Ok(cut);
+            }
+            catch (ArgumentException ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+
         var live = app.MapGroup("/internal/live");
 
         live.MapGet("/sessions", (ILiveTranscodeService svc) => Results.Ok(svc.GetActiveSessions()));

@@ -111,6 +111,15 @@ public static class DependencyInjection
             client.Timeout = TimeSpan.FromSeconds(5);
         });
 
+        // Clips: cortar tarda varios segundos, por eso el cliente tiene más tiempo que el de consultas
+        services.AddHttpClient<IClipRecorder, HttpClipRecorder>((sp, client) =>
+        {
+            var o = sp.GetRequiredService<IOptions<RecorderOptions>>().Value;
+            client.BaseAddress = new Uri(o.BaseUrl.TrimEnd('/') + "/");
+            client.DefaultRequestHeaders.Add(RecorderOptions.KeyHeader, o.Key);
+            client.Timeout = TimeSpan.FromSeconds(90);
+        });
+
         return services;
     }
 
@@ -130,6 +139,7 @@ public static class DependencyInjection
         // Singleton para el pipeline streamlink→ffmpeg→HLS (también IDisposable)
         services.AddSingleton<ILiveTranscodeService, LiveTranscodeService>();
         services.AddSingleton<RecordingIntake>();
+        services.AddSingleton<IClipService, ClipService>();
 
         services.AddHttpClient<ITwitchApiService, TwitchApiService>();
 
@@ -140,6 +150,35 @@ public static class DependencyInjection
         });
 
         return services;
+    }
+
+    /// <summary>Sirve los clips (/clips/{id}.mp4 y .jpg) desde el volumen compartido. Los nombres son GUID: no hay listado.</summary>
+    public static WebApplication UseClipFiles(this WebApplication app)
+    {
+        var o = app.Services.GetRequiredService<IOptions<StreamlinkOptions>>().Value;
+        var dir = ClipService.ClipsDirectory(o);
+        Directory.CreateDirectory(dir);
+
+        var contentTypes = new FileExtensionContentTypeProvider();
+        contentTypes.Mappings[".mp4"] = "video/mp4";
+        contentTypes.Mappings[".jpg"] = "image/jpeg";
+
+        app.UseStaticFiles(new StaticFileOptions
+        {
+            FileProvider        = new PhysicalFileProvider(dir),
+            RequestPath         = "/clips",
+            ContentTypeProvider = contentTypes,
+            ServeUnknownFileTypes = false,
+            OnPrepareResponse   = ctx =>
+            {
+                // Un clip no cambia nunca: se puede cachear.
+                ctx.Context.Response.Headers["Cache-Control"] = "public, max-age=86400";
+                if (!ctx.Context.Response.Headers.ContainsKey("Access-Control-Allow-Origin"))
+                    ctx.Context.Response.Headers["Access-Control-Allow-Origin"] = "*";
+            }
+        });
+
+        return app;
     }
 
     /// <summary>

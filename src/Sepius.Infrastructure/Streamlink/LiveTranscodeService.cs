@@ -15,7 +15,7 @@ namespace Sepius.Infrastructure.Streamlink;
 /// OPTIMIZACIONES vs versión anterior:
 ///   1. UN solo streamlink por canal (antes eran 2: uno para HLS, otro para .mp4).
 ///   2. ffmpeg escribe HLS + MP4 en la misma pasada usando salidas múltiples.
-///   3. HLS: hls_time=2, hls_list_size=30 (segmentos cortos = menos retraso respecto al chat).
+///   3. HLS: hls_time=2, hls_list_size=45 (segmentos cortos = menos retraso respecto al chat).
 ///   4. Health monitor: watchdog task que detecta procesos muertos y auto-reinicia.
 ///   5. RecordingCompleted event integrado (ya no hace falta StreamlinkService separado).
 /// </summary>
@@ -306,7 +306,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
             "-c copy",
             "-f hls",
             "-hls_time 2",
-            "-hls_list_size 30",
+            "-hls_list_size 45",
             "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename {ShellQuote(segPattern)}",
@@ -331,7 +331,7 @@ public sealed class LiveTranscodeService : ILiveTranscodeService, IDisposable
         // Dos salidas (HLS y MP4) con "-c copy". Con el muxer tee el MP4 falla (tag de códec incompatible),
         // así que se usan dos salidas normales; los -map se repiten porque aplican solo a la salida que sigue.
         string Outputs(string map) => string.Join(" ",
-            map, "-c copy", "-f hls", "-hls_time 2", "-hls_list_size 30",
+            map, "-c copy", "-f hls", "-hls_time 2", "-hls_list_size 45",
             "-hls_flags delete_segments+append_list+omit_endlist+independent_segments",
             "-max_muxing_queue_size 1024",
             $"-hls_segment_filename {ShellQuote(segPattern)}",
@@ -422,7 +422,7 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
     {
         var height = Math.Clamp(_options.YtDlpTranscodeHeight, 240, 1080);
         var teeTarget = string.Join("|",
-            $"[f=hls:hls_time=2:hls_list_size=30:hls_flags=delete_segments+append_list+omit_endlist+independent_segments:hls_segment_filename={segPattern}]{m3u8Path}",
+            $"[f=hls:hls_time=2:hls_list_size=45:hls_flags=delete_segments+append_list+omit_endlist+independent_segments:hls_segment_filename={segPattern}]{m3u8Path}",
             $"[f=mp4:movflags=+faststart]{mp4Path}");
 
         var ffArgs = string.Join(" ",
