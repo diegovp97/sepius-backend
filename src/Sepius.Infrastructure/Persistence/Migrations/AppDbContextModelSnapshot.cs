@@ -59,6 +59,15 @@ namespace Sepius.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasColumnType("text");
 
+                    b.Property<int?>("ReplyToId")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ReplyToNickname")
+                        .HasColumnType("text");
+
+                    b.Property<string>("ReplyToText")
+                        .HasColumnType("text");
+
                     b.Property<DateTime>("SentAt")
                         .HasColumnType("timestamp with time zone");
 
