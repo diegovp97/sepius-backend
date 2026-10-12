@@ -553,6 +553,8 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
 
     private async Task CleanupCoreAsync(string key, string platform, string channelName, string mp4Path)
     {
+        // Hora real de fin del directo: el faststart de un fichero grande puede tardar mucho y no debe contar en la duración.
+        var endedAtUtc = DateTime.UtcNow;
         if (!_active.TryRemove(key, out var session))
             return;
 
@@ -574,7 +576,7 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
 
         // Si la grabación MP4 existe y el stream terminó correctamente, notificar
         if (finalStatus is TranscodeStatus.Stopped or TranscodeStatus.Stopping && File.Exists(mp4Path))
-            await FinalizeAndFireAsync(channelName, mp4Path).ConfigureAwait(false);
+            await FinalizeAndFireAsync(channelName, mp4Path, endedAtUtc).ConfigureAwait(false);
     }
 
     /// <summary>Faststart + aviso de grabación completada (la apunta en la cola de subida).</summary>
