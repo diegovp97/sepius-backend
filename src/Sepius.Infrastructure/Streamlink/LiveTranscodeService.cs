@@ -751,23 +751,48 @@ exec {{ffmpeg}} {{inputFlags}} -i {{src}} {{Outputs("$map")}}
 
     // ── Helpers ────────────────────────────────────────────────────────────
 
+    // Un copia de 8-9 GB tarda minutos; si pasa de aquí es que ffmpeg está colgado y se corta.
+    private static readonly TimeSpan FaststartTimeout = TimeSpan.FromMinutes(45);
+
     private async Task<bool> ApplyFaststartAsync(string mp4Path)
     {
         var tempPath = mp4Path + ".faststart.mp4";
         try
         {
+            // -nostats y -v error: sin ellos ffmpeg escribe una línea de progreso cada medio segundo en stderr.
+            // Antes nadie leía esa tubería: al llenarse (64 KB) ffmpeg se quedaba bloqueado para siempre en los
+            // ficheros grandes (8,8 GB colgados 2 h 40 min) y la grabación nunca llegaba a subirse.
             var psi = new ProcessStartInfo
             {
                 FileName = _options.FfmpegPath,
-                Arguments = $"-y -i \"{mp4Path}\" -c copy -movflags +faststart \"{tempPath}\"",
                 UseShellExecute = false,
                 RedirectStandardError = true,
                 CreateNoWindow = true
             };
+            foreach (var a in new[] { "-v", "error", "-nostats", "-y", "-i", mp4Path, "-c", "copy", "-movflags", "+faststart", tempPath })
+                psi.ArgumentList.Add(a);
 
             using var proc = new Process { StartInfo = psi };
+            proc.ErrorDataReceived += (_, e) =>
+            {
+                if (!string.IsNullOrWhiteSpace(e.Data)) _logger.LogWarning("[faststart] {L}", e.Data);
+            };
             proc.Start();
-            await proc.WaitForExitAsync().ConfigureAwait(false);
+            proc.BeginErrorReadLine();
+
+            using var cts = new CancellationTokenSource(FaststartTimeout);
+            try
+            {
+                await proc.WaitForExitAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                try { proc.Kill(entireProcessTree: true); } catch { /* ya terminó */ }
+                _logger.LogWarning("[Transcode] Faststart de '{Path}' superó {Min} min; se sube el MP4 sin él.",
+                    mp4Path, (int)FaststartTimeout.TotalMinutes);
+                if (File.Exists(tempPath)) File.Delete(tempPath);
+                return false;
+            }
 
             if (proc.ExitCode == 0 && File.Exists(tempPath))
             {
